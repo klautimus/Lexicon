@@ -1,18 +1,19 @@
 package recommender
 
 import (
-	"bytes"
-	"context"
-	"database/sql"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"strings"
-	"time"
+\t"bytes"
+\t"context"
+\t"crypto/sha256"
+\t"database/sql"
+\t"encoding/json"
+\t"fmt"
+\t"io"
+\t"log"
+\t"net/http"
+\t"strings"
+\t"time"
 
-	"github.com/go-chi/chi/v5"
+\t"github.com/go-chi/chi/v5"
 )
 
 type DeepSeekConfig struct {
@@ -116,6 +117,9 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DEEPSEEK_API_KEY not configured", 400)
 		return
 	}
+
+	force := r.URL.Query().Get("force") == "true"
+
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
@@ -123,6 +127,27 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
+	}
+
+	profileHash := hashProfile(profile)
+
+	// Cache lookup: check for a playlist generated from the same profile within the last hour
+	if !force {
+		var cachedPayload string
+		err := a.db.QueryRowContext(ctx,
+			`SELECT payload FROM recommendations
+			 WHERE type='playlist' AND prompt_hash=?
+			 AND created_at > strftime('%s','now','-1 hour')
+			 ORDER BY id DESC LIMIT 1`, profileHash).Scan(&cachedPayload)
+		if err == nil {
+			var out PlaylistPayload
+			if json.Unmarshal([]byte(cachedPayload), &out) == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Cache", "HIT")
+				json.NewEncoder(w).Encode(out)
+				return
+			}
+		}
 	}
 
 	prompt := `Given this user's listening profile, generate a cohesive playlist.
@@ -165,7 +190,16 @@ PROFILE:
 		http.Error(w, "invalid playlist JSON: "+err.Error(), 500)
 		return
 	}
-	writeJSON(w, out)
+
+	// Store result in recommendations table for future cache hits
+	raw, _ := json.Marshal(out)
+	_, _ = a.db.ExecContext(ctx,
+		`INSERT INTO recommendations(type, prompt_hash, payload) VALUES('playlist', ?, ?)`,
+		profileHash, string(raw))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Cache", "MISS")
+	json.NewEncoder(w).Encode(out)
 }
 
 type chatReq struct {
@@ -429,6 +463,13 @@ func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFm
 		return "", fmt.Errorf("empty response from model")
 	}
 	return content, nil
+}
+
+// hashProfile returns a 16-char hex prefix of SHA-256 of the profile text,
+// used as a cache key for AI-generated playlists.
+func hashProfile(profile string) string {
+	h := sha256.Sum256([]byte(profile))
+	return fmt.Sprintf("%x", h)[:16]
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {

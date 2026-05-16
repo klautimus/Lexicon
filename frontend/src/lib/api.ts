@@ -45,8 +45,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message }),
     }),
-  generatePlaylist: () =>
-    j<PlaylistPayload>("/recommendations/playlist", { method: "POST" }),
+  generatePlaylist: (force?: boolean) =>
+    j<PlaylistPayload>(`/recommendations/playlist${force ? '?force=true' : ''}`, { method: "POST" }),
   spotifyStatus: () => j<SpotifyStatus>("/spotify/status"),
   spotifyAuthURL: () => "/api/spotify/auth-url",
   spotifyDisconnect: () =>

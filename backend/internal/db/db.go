@@ -143,7 +143,14 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	// Additive column migrations (idempotent)
-	if !columnExists(db, "tracks", "spotify_id") {
+\t// Add type column to recommendations (for playlist cache differentiation)
+\tif !columnExists(db, "recommendations", "type") {
+\t\tif _, err := db.Exec(`ALTER TABLE recommendations ADD COLUMN type TEXT NOT NULL DEFAULT 'general'`); err != nil {
+\t\t\treturn err
+\t\t}
+\t}
+
+\tif !columnExists(db, "tracks", "spotify_id") {
 		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN spotify_id TEXT`); err != nil {
 			return err
 		}
