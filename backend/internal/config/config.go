@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 type Config struct {
 	Port               string
@@ -24,10 +27,11 @@ type Config struct {
 	YtdlpBin           string
 	YtdlpFormat        string
 	FfmpegBin          string
+	DownloadConcurrency int
 }
 
 func Load() Config {
-	return Config{
+	cfg := Config{
 		Port:               env("PORT", "8787"),
 		DBPath:             env("DB_PATH", "./data/lexicon.db"),
 		MediaRoots:         env("MEDIA_ROOTS", ""),
@@ -50,6 +54,17 @@ func Load() Config {
 		YtdlpFormat:        env("YTDLP_FORMAT", "mp3"),
 		FfmpegBin:          env("FFMPEG_BIN", ""),
 	}
+
+	if v := os.Getenv("DOWNLOAD_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.DownloadConcurrency = n
+		}
+	}
+	if cfg.DownloadConcurrency <= 0 {
+		cfg.DownloadConcurrency = 2
+	}
+
+	return cfg
 }
 
 func env(key, def string) string {

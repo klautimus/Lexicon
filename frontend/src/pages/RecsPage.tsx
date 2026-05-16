@@ -455,6 +455,30 @@ export default function RecsPage() {
                   View Playlist
                 </a>
               )}
+              {/* Regenerate button — only shown when playlist preview exists */}
+              <button
+                onClick={async () => {
+                  setGeneratingPlaylist(true);
+                  try {
+                    const data = await api.generatePlaylist(true);
+                    setPlaylistPreview(data);
+                    const initStatus: Record<string, "pending"> = {};
+                    data.tracks.forEach((t) => {
+                      initStatus[`${t.artist} - ${t.title}`] = "pending";
+                    });
+                    setPlaylistTrackStatus(initStatus);
+                    setCreatedPlaylistId(null);
+                  } catch (e: any) {
+                    toast.error(e.message || 'Failed to regenerate');
+                  } finally {
+                    setGeneratingPlaylist(false);
+                  }
+                }}
+                className="text-xs text-gray-400 hover:text-white transition-colors"
+                disabled={generatingPlaylist}
+              >
+                {generatingPlaylist ? 'Generating...' : '\u{1F504} Regenerate'}
+              </button>
               <button
                 onClick={createAiPlaylist}
                 disabled={creatingPlaylist || !!createdPlaylistId}
@@ -465,7 +489,7 @@ export default function RecsPage() {
                 ) : (
                   <ListMusic size={14} />
                 )}
-                {creatingPlaylist ? "Creating…" : createdPlaylistId ? "Created" : "Create Playlist"}
+                {creatingPlaylist ? "Creating\u2026" : createdPlaylistId ? "Created" : "Create Playlist"}
               </button>
             </div>
           </div>

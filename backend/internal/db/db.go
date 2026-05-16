@@ -114,6 +114,22 @@ CREATE TABLE IF NOT EXISTS spotify_pkce (
 	code_verifier TEXT NOT NULL,
 	created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+CREATE TABLE IF NOT EXISTS download_jobs (
+	id TEXT PRIMARY KEY,
+	url TEXT NOT NULL,
+	output TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'queued',
+	started_at INTEGER NOT NULL,
+	finished_at INTEGER,
+	error TEXT,
+	tool TEXT,
+	used_fallback INTEGER NOT NULL DEFAULT 0,
+	is_search INTEGER NOT NULL DEFAULT 0,
+	track_id INTEGER,
+	created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status);
 `
 
 // columnExists returns true if the given column already exists on the table.
@@ -146,6 +162,13 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	// Additive column migrations (idempotent)
+	// Add type column to recommendations (for playlist cache differentiation)
+	if !columnExists(db, "recommendations", "type") {
+		if _, err := db.Exec(`ALTER TABLE recommendations ADD COLUMN type TEXT NOT NULL DEFAULT 'general'`); err != nil {
+			return err
+		}
+	}
+
 	if !columnExists(db, "tracks", "spotify_id") {
 		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN spotify_id TEXT`); err != nil {
 			return err
