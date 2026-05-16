@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -480,6 +482,7 @@ func (a *API) run(job *Job) {
 	}
 
 	if primaryErr == nil {
+		a.validateOutput(job)
 		a.finish(job, StatusSucceeded, "")
 		if a.rescan != nil {
 			go a.rescan()
@@ -543,6 +546,7 @@ func (a *API) run(job *Job) {
 	}
 
 	if fallbackErr == nil {
+		a.validateOutput(job)
 		a.finish(job, StatusSucceeded, "")
 		if a.rescan != nil {
 			go a.rescan()
@@ -624,6 +628,7 @@ func (a *API) run(job *Job) {
 		a.finish(job, StatusFailed, fmt.Sprintf("all tools failed. spotiflac: %s; yt-dlp: %s; spotdl: %s", primaryErr.Error(), fallbackErr.Error(), spotdlErr.Error()))
 		return
 	}
+	a.validateOutput(job)
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
@@ -693,6 +698,7 @@ func (a *API) runSearch(job *Job) {
 		a.finish(job, StatusFailed, fmt.Sprintf("yt-dlp failed: %s", err.Error()))
 		return
 	}
+	a.validateOutput(job)
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
@@ -741,6 +747,47 @@ func (a *API) appendLog(job *Job, line string) {
 	job.Log = append(job.Log, line)
 	if len(job.Log) > maxLogLines {
 		job.Log = job.Log[len(job.Log)-maxLogLines:]
+	}
+}
+
+func isValidAudioFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".wma", ".opus":
+		return true
+	}
+	// Try MIME detection as fallback
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	mime := http.DetectContentType(buf[:n])
+	return strings.HasPrefix(mime, "audio/")
+}
+
+// validateOutput checks the output directory for audio files and logs a warning
+// if none are found. It does not fail the job — validation is informational only.
+func (a *API) validateOutput(job *Job) {
+	outputDir := a.cfg.Output
+	if outputDir == "" {
+		return
+	}
+	found := false
+	filepath.Walk(outputDir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil || fi.IsDir() {
+			return nil
+		}
+		if isValidAudioFile(p) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if !found {
+		a.appendLog(job, "[validation] WARNING: no audio files found in output directory after successful download")
 	}
 }
 
