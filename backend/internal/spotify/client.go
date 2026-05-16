@@ -112,6 +112,7 @@ type SpotifyTrack struct {
 		ReleaseDate string `json:"release_date"`
 	} `json:"album"`
 	Artists []struct {
+		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"artists"`
 }
@@ -154,4 +155,45 @@ func releaseYear(date string) int {
 		return y
 	}
 	return 0
+}
+
+func fetchArtistGenres(ctx context.Context, accessToken string, artistIDs []string) (map[string]string, error) {
+	if len(artistIDs) == 0 {
+		return nil, nil
+	}
+	const batchSize = 50
+	genreMap := make(map[string]string)
+	for i := 0; i < len(artistIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(artistIDs) {
+			end = len(artistIDs)
+		}
+		batch := artistIDs[i:end]
+		q := url.Values{}
+		q.Set("ids", strings.Join(batch, ","))
+		resp, err := spotifyGET(ctx, accessToken, "/artists", q)
+		if err != nil {
+			return genreMap, fmt.Errorf("fetch artists batch %d: %w", i/batchSize, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			return genreMap, fmt.Errorf("artists API %d: %s", resp.StatusCode, string(body))
+		}
+		var result struct {
+			Artists []struct {
+				ID     string   `json:"id"`
+				Genres []string `json:"genres"`
+			} `json:"artists"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return genreMap, fmt.Errorf("parse artists response: %w", err)
+		}
+		for _, artist := range result.Artists {
+			if len(artist.Genres) > 0 {
+				genreMap[artist.ID] = strings.Join(artist.Genres, ", ")
+			}
+		}
+	}
+	return genreMap, nil
 }
