@@ -6,6 +6,7 @@ type Config struct {
 	Port               string
 	DBPath             string
 	MediaRoots         string
+	Timezone           string
 	DeepSeekAPIKey     string
 	DeepSeekModel      string
 	DeepSeekThinking   string
@@ -30,6 +31,7 @@ func Load() Config {
 		Port:               env("PORT", "8787"),
 		DBPath:             env("DB_PATH", "./data/lexicon.db"),
 		MediaRoots:         env("MEDIA_ROOTS", ""),
+		Timezone:           env("TIMEZONE", "local"),
 		DeepSeekAPIKey:     env("DEEPSEEK_API_KEY", ""),
 		DeepSeekModel:      env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
 		DeepSeekThinking:   env("DEEPSEEK_THINKING", "medium"),

@@ -55,7 +55,7 @@ func main() {
 	playlistAPI := playlists.New(database)
 	strm := streamer.New(database)
 	hist := history.New(database)
-	analyt := analytics.New(database)
+	analyt := analytics.New(database, cfg.Timezone)
 	rec := recommender.New(database, recommender.DeepSeekConfig{
 		APIKey:   cfg.DeepSeekAPIKey,
 		Model:    cfg.DeepSeekModel,

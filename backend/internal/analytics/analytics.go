@@ -3,14 +3,15 @@ package analytics
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 )
 
-type API struct{ db *sql.DB }
+type API struct{ db *sql.DB; timezone string }
 
-func New(db *sql.DB) *API { return &API{db: db} }
+func New(db *sql.DB, timezone string) *API { return &API{db: db, timezone: timezone} }
 
 func (a *API) Mount(r chi.Router) {
 	r.Get("/api/analytics/overview", a.overview)
@@ -127,10 +128,14 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`
-		SELECT CAST(strftime('%w', started_at, 'unixepoch','localtime') AS INTEGER) AS dow,
-		       CAST(strftime('%H', started_at, 'unixepoch','localtime') AS INTEGER) AS hour,
-		       COUNT(*) FROM plays GROUP BY dow, hour`)
+	tzMod := a.timezone
+	if tzMod == "local" {
+		tzMod = "localtime"
+	}
+	q := fmt.Sprintf(`SELECT CAST(strftime('%%w', started_at, 'unixepoch', '%s') AS INTEGER) AS dow,
+	       CAST(strftime('%%H', started_at, 'unixepoch', '%s') AS INTEGER) AS hour,
+	       COUNT(*) FROM plays GROUP BY dow, hour`, tzMod, tzMod)
+	rows, err := a.db.Query(q)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
