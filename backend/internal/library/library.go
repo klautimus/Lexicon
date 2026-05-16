@@ -66,6 +66,16 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	kind := r.URL.Query().Get("kind")
+
+	var total int
+	countQ := `SELECT COUNT(*) FROM tracks`
+	countArgs := []interface{}{}
+	if kind != "" {
+		countQ += ` WHERE media_kind=?`
+		countArgs = append(countArgs, kind)
+	}
+	a.db.QueryRowContext(r.Context(), countQ, countArgs...).Scan(&total)
+
 	q := `SELECT ` + trackCols + ` FROM tracks`
 	args := []interface{}{}
 	if kind != "" {
@@ -85,7 +95,7 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 		t, _ := scanTrack(rows)
 		out = append(out, t)
 	}
-	writeJSON(w, out)
+	writeJSON(w, map[string]interface{}{"tracks": out, "total": total})
 }
 
 func (a *API) albums(w http.ResponseWriter, r *http.Request) {
