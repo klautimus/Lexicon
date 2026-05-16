@@ -2,10 +2,32 @@ const API = "/api";
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(API + path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "1",
+      ...(init?.headers || {}),
+    },
     ...init,
   });
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) {
+    const text = await r.text();
+    if (text.includes("ngrok")) {
+      throw new Error(
+        "Request blocked by ngrok free tier. Please refresh the page and click 'Visit Site' to continue."
+      );
+    }
+    throw new Error(`${r.status} ${text}`);
+  }
+  const contentType = r.headers.get("content-type") || "";
+  if (contentType.includes("text/html")) {
+    const text = await r.text();
+    if (text.includes("ngrok")) {
+      throw new Error(
+        "Request blocked by ngrok free tier. Please refresh the page and click 'Visit Site' to continue."
+      );
+    }
+    throw new Error(`Expected JSON but got HTML (HTTP ${r.status})`);
+  }
   return r.json();
 }
 
