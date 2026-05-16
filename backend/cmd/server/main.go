@@ -93,24 +93,24 @@ func main() {
 			}
 		}
 	}
-\tdlAPI := downloader.New(downloader.Config{
-\t\tBin:                 cfg.SpotiflacBin,
-\t\tOutput:              dlOutput,
-\t\tFolderFormat:        cfg.SpotiflacFolderFmt,
-\t\tSpotdlBin:           cfg.SpotdlBin,
-\t\tSpotdlFormat:        cfg.SpotdlFormat,
-\t\tSpotdlAudio:         cfg.SpotdlAudio,
-\t\tSpotifyClientID:     cfg.SpotifyClientID,
-\t\tSpotifyClientSecret: cfg.SpotifyClientSecret,
-\t\tYtdlpBin:            cfg.YtdlpBin,
-\t\tYtdlpFormat:         cfg.YtdlpFormat,
-\t\tFfmpegBin:           cfg.FfmpegBin,
-\t\tDeepSeekAPIKey:      cfg.DeepSeekAPIKey,
-\t\tDeepSeekModel:       cfg.DeepSeekModel,
-\t\tDeepSeekThinking:    cfg.DeepSeekThinking,
-\t\tDeepSeekBaseURL:     "",
-\t\tDownloadConcurrency: cfg.DownloadConcurrency,
-\t}, database, doRescan)
+	dlAPI := downloader.New(downloader.Config{
+		Bin:                 cfg.SpotiflacBin,
+		Output:              dlOutput,
+		FolderFormat:        cfg.SpotiflacFolderFmt,
+		SpotdlBin:           cfg.SpotdlBin,
+		SpotdlFormat:        cfg.SpotdlFormat,
+		SpotdlAudio:         cfg.SpotdlAudio,
+		SpotifyClientID:     cfg.SpotifyClientID,
+		SpotifyClientSecret: cfg.SpotifyClientSecret,
+		YtdlpBin:            cfg.YtdlpBin,
+		YtdlpFormat:         cfg.YtdlpFormat,
+		FfmpegBin:           cfg.FfmpegBin,
+		DeepSeekAPIKey:      cfg.DeepSeekAPIKey,
+		DeepSeekModel:       cfg.DeepSeekModel,
+		DeepSeekThinking:    cfg.DeepSeekThinking,
+		DeepSeekBaseURL:     "",
+		DownloadConcurrency: cfg.DownloadConcurrency,
+	}, database, doRescan)
 
 	// Initial scan in background
 	go func() {
