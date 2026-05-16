@@ -1,0 +1,148 @@
+# Lexicon Release Build Pipeline
+# Run this on the developer's Windows machine to produce LexiconSetup.exe
+#
+# Prerequisites:
+#   - Node.js + npm (for frontend build)
+#   - Go 1.22+ (for backend build)
+#   - Inno Setup 6+ (for installer compilation)
+#
+# Usage:
+#   cd release
+#   powershell -ExecutionPolicy Bypass -File build.ps1
+
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $PSScriptRoot
+$release = Join-Path $root "release"
+$backend = Join-Path $root "backend"
+$frontend = Join-Path $root "frontend"
+$tools = Join-Path $root "tools"
+
+function Step($msg) {
+    Write-Host "`n==> $msg" -ForegroundColor Cyan
+}
+
+# 1. Build frontend
+Step "Building frontend..."
+Set-Location $frontend
+if (-not (Test-Path "node_modules")) {
+    npm install
+}
+npm run build
+if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
+
+# 2. Copy dist into backend embed directory
+Step "Copying frontend/dist into backend embed directory..."
+$embedDist = Join-Path $backend "cmd\server\dist"
+if (Test-Path $embedDist) {
+    Remove-Item -Recurse -Force $embedDist
+}
+Copy-Item -Recurse (Join-Path $frontend "dist") $embedDist
+
+# 3. Build Go binary
+Step "Building Go backend (single binary with embedded frontend)..."
+Set-Location $backend
+$binary = Join-Path $release "lexicon.exe"
+go build -ldflags "-s -w" -o $binary ./cmd/server
+if ($LASTEXITCODE -ne 0) { throw "Go build failed" }
+Write-Host "Binary: $binary ($((Get-Item $binary).Length / 1MB) MB)"
+
+# 4. Gather tool binaries
+Step "Gathering tool binaries..."
+$releaseTools = Join-Path $release "tools"
+if (-not (Test-Path $releaseTools)) {
+    New-Item -ItemType Directory -Path $releaseTools | Out-Null
+}
+
+# Bundle spotiflac.exe if it exists
+$spotiflacSrc = Join-Path $tools "spotiflac.exe"
+if (Test-Path $spotiflacSrc) {
+    Copy-Item $spotiflacSrc (Join-Path $releaseTools "spotiflac.exe")
+    Write-Host "Bundled spotiflac.exe"
+} else {
+    Write-Warning "spotiflac.exe not found at $spotiflacSrc"
+}
+
+# Download yt-dlp.exe if missing
+$ytDlpDest = Join-Path $releaseTools "yt-dlp.exe"
+if (-not (Test-Path $ytDlpDest)) {
+    Write-Host "Downloading yt-dlp.exe..."
+    try {
+        Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile $ytDlpDest -UseBasicParsing
+        Write-Host "Downloaded yt-dlp.exe"
+    } catch {
+        Write-Warning "Failed to download yt-dlp.exe: $_"
+    }
+} else {
+    Write-Host "Bundled yt-dlp.exe"
+}
+
+# Download spotdl.exe if missing
+$spotdlDest = Join-Path $releaseTools "spotdl.exe"
+if (-not (Test-Path $spotdlDest)) {
+    Write-Host "Downloading spotdl.exe..."
+    try {
+        $releaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/spotDL/spotify-downloader/releases/latest" -UseBasicParsing
+        $asset = $releaseInfo.assets | Where-Object { $_.name -like "*win32.exe" } | Select-Object -First 1
+        if ($asset) {
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $spotdlDest -UseBasicParsing
+            Write-Host "Downloaded spotdl.exe ($($asset.name))"
+        } else {
+            Write-Warning "No win32.exe asset found in latest SpotDL release"
+        }
+    } catch {
+        Write-Warning "Failed to download spotdl.exe: $_"
+    }
+} else {
+    Write-Host "Bundled spotdl.exe"
+}
+
+# Try to find and copy ngrok.exe (skip Windows App aliases which are 0-byte stubs)
+$ngrokDest = Join-Path $releaseTools "ngrok.exe"
+if (-not (Test-Path $ngrokDest)) {
+    $ngrokSrc = (Get-Command ngrok -ErrorAction SilentlyContinue).Source
+    if ($ngrokSrc) {
+        $srcInfo = Get-Item $ngrokSrc
+        if ($srcInfo.Length -gt 0) {
+            Copy-Item $ngrokSrc $ngrokDest
+            Write-Host "Bundled ngrok.exe"
+        } else {
+            Write-Warning "ngrok.exe is a Windows App alias (0-byte stub) - cannot bundle. Install from https://ngrok.com/download"
+        }
+    } else {
+        Write-Warning "ngrok.exe not found in PATH. Install from https://ngrok.com/download"
+    }
+} else {
+    Write-Host "Bundled ngrok.exe"
+}
+
+# Check for ffmpeg.exe (too large to auto-download reliably)
+$ffmpegDest = Join-Path $releaseTools "ffmpeg.exe"
+if (-not (Test-Path $ffmpegDest)) {
+    $ffmpegSrc = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
+    if ($ffmpegSrc) {
+        Copy-Item $ffmpegSrc $ffmpegDest
+        $ffprobeSrc = Join-Path (Split-Path $ffmpegSrc) "ffprobe.exe"
+        if (Test-Path $ffprobeSrc) {
+            Copy-Item $ffprobeSrc (Join-Path $releaseTools "ffprobe.exe")
+        }
+        Write-Host "Bundled ffmpeg.exe"
+    } else {
+        Write-Warning "ffmpeg.exe not found. Install from https://www.gyan.dev/ffmpeg/builds/ and place ffmpeg.exe in tools/"
+    }
+} else {
+    Write-Host "Bundled ffmpeg.exe"
+}
+
+# 5. Compile Inno Setup installer
+Step "Compiling installer with Inno Setup..."
+$iss = Join-Path $release "lexicon.iss"
+$iscc = "C:\Program Files (x86)\Inno Setup 6\iscc.exe"
+if (-not (Test-Path $iscc)) {
+    $iscc = "iscc.exe"
+}
+& $iscc $iss
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+
+Step "Build complete!"
+Write-Host "Output: $release\LexiconSetup.exe" -ForegroundColor Green
+Set-Location $release

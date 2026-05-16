@@ -1,0 +1,53 @@
+# Dependencies
+frontend/node_modules/
+backend/vendor/
+
+# Build output
+frontend/dist/
+backend/cmd/server/dist/
+*.exe
+*.tsbuildinfo
+
+# Secrets
+.env
+*.env
+!*.env.example
+
+# Database
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# Archive
+*.zip
+*.tar.gz
+*.7z
+
+# Environment
+.venv/
+venv/
+
+# Embedded git repos
+tools/spotiflac-src/

@@ -1,0 +1,237 @@
+const API = "/api";
+
+async function j<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(API + path, {
+    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    ...init,
+  });
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+export const api = {
+  health: () => j<{ ok: boolean }>("/health"),
+  scan: () => j<{ started: boolean }>("/scan", { method: "POST" }),
+  stats: () => j<Stats>("/library/stats"),
+  tracks: (kind?: string, limit = 200) =>
+    j<Track[]>(`/library/tracks?limit=${limit}${kind ? `&kind=${kind}` : ""}`),
+  albums: () => j<Album[]>("/library/albums"),
+  artists: () => j<Artist[]>("/library/artists"),
+  podcasts: () => j<Podcast[]>("/library/podcasts"),
+  search: (q: string) =>
+    j<Track[]>(`/library/search?q=${encodeURIComponent(q)}`),
+  track: (id: number) => j<Track>(`/library/track/${id}`),
+  streamUrl: (id: number) => `${API}/stream/${id}`,
+  coverUrl: (id: number) => `${API}/library/cover/${id}`,
+  recordPlay: (data: PlayRecord) =>
+    j<{ ok: boolean }>("/history/play", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  recent: () => j<RecentPlay[]>("/history/recent"),
+  overview: () => j<Overview>("/analytics/overview"),
+  topArtists: () => j<TopArtist[]>("/analytics/top-artists"),
+  topTracks: () => j<TopTrack[]>("/analytics/top-tracks"),
+  topGenres: () => j<TopGenre[]>("/analytics/top-genres"),
+  heatmap: () => j<HeatCell[]>("/analytics/heatmap"),
+  recs: () =>
+    j<{ empty?: boolean; created_at?: number; data?: RecsPayload }>(
+      "/recommendations"
+    ),
+  refreshRecs: () =>
+    j<RecsPayload>("/recommendations/refresh", { method: "POST" }),
+  chat: (message: string) =>
+    j<{ reply: string; playlist?: PlaylistPayload }>("/recommendations/chat", {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
+  generatePlaylist: () =>
+    j<PlaylistPayload>("/recommendations/playlist", { method: "POST" }),
+  spotifyStatus: () => j<SpotifyStatus>("/spotify/status"),
+  spotifyAuthURL: () => "/api/spotify/auth-url",
+  spotifyDisconnect: () =>
+    j<{ ok: boolean }>("/spotify/disconnect", { method: "POST" }),
+  spotifySync: () =>
+    j<{ started: boolean }>("/spotify/sync", { method: "POST" }),
+  spotifyToken: () => j<{ access_token: string }>("/spotify/token"),
+  downloadStatus: () => j<DownloadStatus>("/download/status"),
+  download: (url: string) =>
+    j<DownloadJob>("/download", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  downloadSearch: (query: string) =>
+    j<DownloadJob>("/download/search", {
+      method: "POST",
+      body: JSON.stringify({ query }),
+    }),
+  downloadJobs: () => j<DownloadJob[]>("/download/jobs"),
+  downloadJob: (id: string) => j<DownloadJob>(`/download/jobs/${id}`),
+  downloadCancel: (id: string) =>
+    j<{ ok: boolean }>(`/download/jobs/${id}/cancel`, { method: "POST" }),
+  playlists: () => j<Playlist[]>('/playlists'),
+  createPlaylist: (name: string) =>
+    j<Playlist>('/playlists', { method: 'POST', body: JSON.stringify({ name }) }),
+  playlist: (id: number) => j<PlaylistWithTracks>(`/playlists/${id}`),
+  updatePlaylist: (id: number, name: string) =>
+    j<{ ok: boolean }>(`/playlists/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
+  deletePlaylist: (id: number) =>
+    j<{ ok: boolean }>(`/playlists/${id}`, { method: 'DELETE' }),
+  addToPlaylist: (playlistId: number, trackId: number) =>
+    j<{ ok: boolean }>(`/playlists/${playlistId}/tracks`, { method: 'POST', body: JSON.stringify({ track_id: trackId }) }),
+  removeFromPlaylist: (playlistId: number, position: number) =>
+    j<{ ok: boolean }>(`/playlists/${playlistId}/tracks/${position}`, { method: 'DELETE' }),
+  deleteTrack: (trackId: number) =>
+    j<void>(`/library/track/${trackId}`, { method: 'DELETE' }),
+};
+
+export interface DownloadStatus {
+  configured: boolean;
+  bin?: string;
+  output?: string;
+  fallback_enabled: boolean;
+  spotdl_bin?: string;
+  spotdl_format?: string;
+}
+
+export interface DownloadJob {
+  id: string;
+  url: string;
+  output: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  started_at: number;
+  finished_at?: number;
+  error?: string;
+  tool?: string;
+  used_fallback?: boolean;
+  track_id?: number;
+  log?: string[];
+}
+
+export interface Track {
+  id: number;
+  title: string;
+  artist: string;
+  album_artist: string;
+  album: string;
+  track_no: number;
+  disc_no: number;
+  year: number;
+  genre: string;
+  duration_sec: number;
+  media_kind: string;
+  mime: string;
+  spotify_id?: string | null;
+  external_url?: string | null;
+}
+
+export interface SpotifyStatus {
+  configured: boolean;
+  connected: boolean;
+  display_name?: string;
+  product?: string;
+  user_id?: string;
+  last_synced_at?: number;
+  has_playback_sdk: boolean;
+}
+export interface Album {
+  album: string;
+  artist: string;
+  year: number;
+  tracks: number;
+}
+export interface Artist {
+  artist: string;
+  tracks: number;
+  albums: number;
+}
+export interface Podcast {
+  show: string;
+  episodes: number;
+}
+export interface Stats {
+  tracks: number;
+  albums: number;
+  artists: number;
+  podcasts: number;
+}
+export interface PlayRecord {
+  track_id: number;
+  duration_played_sec: number;
+  completed: boolean;
+  source?: string;
+  started_at?: number;
+}
+export interface RecentPlay {
+  id: number;
+  track_id: number;
+  title: string;
+  artist: string;
+  album: string;
+  started_at: number;
+  duration_played_sec: number;
+  completed: boolean;
+  source: string;
+}
+export interface Overview {
+  total_plays: number;
+  unique_tracks: number;
+  listen_sec: number;
+  completed_pct: number;
+}
+export interface TopArtist {
+  artist: string;
+  plays: number;
+  listen_sec: number;
+}
+export interface TopTrack {
+  id: number;
+  title: string;
+  artist: string;
+  plays: number;
+}
+export interface TopGenre {
+  genre: string;
+  plays: number;
+}
+export interface HeatCell {
+  dow: number;
+  hour: number;
+  plays: number;
+}
+export interface RecItem {
+  title: string;
+  artist: string;
+  reason: string;
+  type: string;
+  track_id?: number | null;
+}
+export interface RecsPayload {
+  summary: string;
+  trends: string;
+  items: RecItem[];
+}
+
+export interface PlaylistTrack {
+  title: string;
+  artist: string;
+  reason: string;
+}
+
+export interface PlaylistPayload {
+  name: string;
+  description: string;
+  tracks: PlaylistTrack[];
+}
+
+export interface Playlist {
+  id: number;
+  name: string;
+  track_count: number;
+  total_duration: number;
+  created_at: number;
+}
+
+export interface PlaylistWithTracks extends Playlist {
+  tracks: Track[];
+}
