@@ -171,7 +171,7 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	}
 	ftsQ := strings.Join(parts, " AND ")
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT `+models.TrackCols+`
+		SELECT `+models.TrackColsAliased("t")+`
 		FROM tracks_fts f JOIN tracks t ON t.id=f.rowid
 		WHERE tracks_fts MATCH ? ORDER BY rank LIMIT 100`, ftsQ)
 	if err != nil {

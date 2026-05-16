@@ -1,69 +1,107 @@
 package models
 
-import "database/sql"
+import (
+	"database/sql"
+	"strings"
+)
 
 // Track is the canonical Track type used throughout Lexicon.
 type Track struct {
-	ID           int64   `json:"id"`
-	Path         *string `json:"path"`
-	Title        string  `json:"title"`
-	Artist       string  `json:"artist"`
-	AlbumArtist  *string `json:"album_artist"`
-	Album        string  `json:"album"`
-	Year         int     `json:"year"`
-	Genre        string  `json:"genre"`
-	DurationSec  float64 `json:"duration_sec"`
-	Mime         string  `json:"mime"`
-	MediaKind    string  `json:"media_kind"`
-	SpotifyID    *string `json:"spotify_id"`
-	ExternalURL  *string `json:"external_url"`
-	FileSize     *int64  `json:"file_size"`
-	DiscNo       int     `json:"disc_no"`
-	TrackNo      int     `json:"track_no"`
-	Bitrate      int     `json:"bitrate"`
-	SampleRate   int     `json:"sample_rate"`
-	CreatedAt    int64   `json:"created_at"`
-	ModifiedAt   *int64  `json:"modified_at"`
+	ID          int64  `json:"id"`
+	Title       string `json:"title"`
+	Artist      string `json:"artist"`
+	AlbumArtist string `json:"album_artist"`
+	Album       string `json:"album"`
+	TrackNo     int    `json:"track_no"`
+	DiscNo      int    `json:"disc_no"`
+	Year        int    `json:"year"`
+	Genre       string `json:"genre"`
+	DurationSec int    `json:"duration_sec"`
+	MediaKind   string `json:"media_kind"`
+	Mime        string `json:"mime"`
+	SpotifyID   string `json:"spotify_id,omitempty"`
+	ExternalURL string `json:"external_url,omitempty"`
 }
 
-// TrackCols is the list of track columns in SELECT queries.
-const TrackCols = `id, path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, spotify_id, external_url, file_size, disc_no, track_no, bitrate, sample_rate, created_at, modified_at`
+// TrackCols matches the actual tracks table schema exactly.
+// Column order must match ScanTrack's Scan argument order.
+// Uses raw column names — NULLs are handled by sql.NullString in ScanTrack.
+const TrackCols = `id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, spotify_id, external_url`
 
-// ScanTrack scans a Track from a row.
+// TrackColsAliased returns TrackCols with a table prefix for JOIN queries
+// where column names might be ambiguous (e.g., tracks_fts has title, artist, etc.).
+func TrackColsAliased(alias string) string {
+	cols := []string{
+		"id", "title", "artist", "album_artist", "album",
+		"track_no", "disc_no", "year", "genre",
+		"duration_sec", "media_kind", "mime",
+		"spotify_id", "external_url",
+	}
+	for i, c := range cols {
+		cols[i] = alias + "." + c
+	}
+	return strings.Join(cols, ", ")
+}
+
+// ScanTrack scans a Track from a database row. The row must have been
+// SELECTed with TrackCols (column order must match the Scan args below).
 func ScanTrack(s interface {
 	Scan(dest ...interface{}) error
 }) (Track, error) {
 	var t Track
-	var path, albumArtist, spotifyID, externalURL sql.NullString
-	var fileSize, modifiedAt sql.NullInt64
+	var title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
+	var spotifyID, externalURL sql.NullString
+	var trackNo, discNo, year, durationSec sql.NullInt64
 
 	err := s.Scan(
-		&t.ID, &path, &t.Title, &t.Artist, &albumArtist, &t.Album,
-		&t.Year, &t.Genre, &t.DurationSec, &t.Mime, &t.MediaKind,
-		&spotifyID, &externalURL, &fileSize, &t.DiscNo, &t.TrackNo,
-		&t.Bitrate, &t.SampleRate, &t.CreatedAt, &modifiedAt,
+		&t.ID,
+		&title, &artist, &albumArtist, &album,
+		&trackNo, &discNo, &year, &genre,
+		&durationSec, &mediaKind, &mime,
+		&spotifyID, &externalURL,
 	)
 	if err != nil {
 		return t, err
 	}
 
-	if path.Valid {
-		t.Path = &path.String
+	if title.Valid {
+		t.Title = title.String
+	}
+	if artist.Valid {
+		t.Artist = artist.String
 	}
 	if albumArtist.Valid {
-		t.AlbumArtist = &albumArtist.String
+		t.AlbumArtist = albumArtist.String
+	}
+	if album.Valid {
+		t.Album = album.String
+	}
+	if trackNo.Valid {
+		t.TrackNo = int(trackNo.Int64)
+	}
+	if discNo.Valid {
+		t.DiscNo = int(discNo.Int64)
+	}
+	if year.Valid {
+		t.Year = int(year.Int64)
+	}
+	if genre.Valid {
+		t.Genre = genre.String
+	}
+	if durationSec.Valid {
+		t.DurationSec = int(durationSec.Int64)
+	}
+	if mediaKind.Valid {
+		t.MediaKind = mediaKind.String
+	}
+	if mime.Valid {
+		t.Mime = mime.String
 	}
 	if spotifyID.Valid {
-		t.SpotifyID = &spotifyID.String
+		t.SpotifyID = spotifyID.String
 	}
 	if externalURL.Valid {
-		t.ExternalURL = &externalURL.String
-	}
-	if modifiedAt.Valid {
-		t.ModifiedAt = &modifiedAt.Int64
-	}
-	if fileSize.Valid {
-		t.FileSize = &fileSize.Int64
+		t.ExternalURL = externalURL.String
 	}
 
 	return t, nil
