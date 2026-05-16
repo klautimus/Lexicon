@@ -7,32 +7,8 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/models"
 )
-
-const trackCols = `t.id,t.title,IFNULL(t.artist,''),IFNULL(t.album_artist,''),IFNULL(t.album,''),IFNULL(t.track_no,0),IFNULL(t.disc_no,0),IFNULL(t.year,0),IFNULL(t.genre,''),IFNULL(t.duration_sec,0),t.media_kind,IFNULL(t.mime,''),IFNULL(t.spotify_id,''),IFNULL(t.external_url,'')`
-
-type Track struct {
-	ID          int64  `json:"id"`
-	Title       string `json:"title"`
-	Artist      string `json:"artist"`
-	AlbumArtist string `json:"album_artist"`
-	Album       string `json:"album"`
-	TrackNo     int    `json:"track_no"`
-	DiscNo      int    `json:"disc_no"`
-	Year        int    `json:"year"`
-	Genre       string `json:"genre"`
-	DurationSec int    `json:"duration_sec"`
-	MediaKind   string `json:"media_kind"`
-	Mime        string `json:"mime"`
-	SpotifyID   string `json:"spotify_id,omitempty"`
-	ExternalURL string `json:"external_url,omitempty"`
-}
-
-func scanTrack(rows interface{ Scan(...interface{}) error }) (Track, error) {
-	var t Track
-	err := rows.Scan(&t.ID, &t.Title, &t.Artist, &t.AlbumArtist, &t.Album, &t.TrackNo, &t.DiscNo, &t.Year, &t.Genre, &t.DurationSec, &t.MediaKind, &t.Mime, &t.SpotifyID, &t.ExternalURL)
-	return t, err
-}
 
 type Playlist struct {
 	ID            int64  `json:"id"`
@@ -43,12 +19,12 @@ type Playlist struct {
 }
 
 type PlaylistWithTracks struct {
-	ID            int64   `json:"id"`
-	Name          string  `json:"name"`
-	TrackCount    int     `json:"track_count"`
-	TotalDuration int     `json:"total_duration"`
-	CreatedAt     int64   `json:"created_at"`
-	Tracks        []Track `json:"tracks"`
+	ID            int64          `json:"id"`
+	Name          string         `json:"name"`
+	TrackCount    int            `json:"track_count"`
+	TotalDuration int            `json:"total_duration"`
+	CreatedAt     int64          `json:"created_at"`
+	Tracks        []models.Track `json:"tracks"`
 }
 
 type API struct{ db *sql.DB }
@@ -129,9 +105,9 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT `+trackCols+`
+		SELECT `+models.TrackCols+`
 		FROM playlist_items i
-		JOIN tracks t ON t.id = i.track_id
+		JOIN tracks ON tracks.id = i.track_id
 		WHERE i.playlist_id = ?
 		ORDER BY i.position`, id)
 	if err != nil {
@@ -140,9 +116,9 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		t, _ := scanTrack(rows)
+		t, _ := models.ScanTrack(rows)
 		p.Tracks = append(p.Tracks, t)
-		p.TotalDuration += t.DurationSec
+		p.TotalDuration += int(t.DurationSec)
 	}
 	if err := rows.Err(); err != nil {
 		http.Error(w, err.Error(), 500)
