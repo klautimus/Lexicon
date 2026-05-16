@@ -9,38 +9,12 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/models"
 )
 
 type API struct{ db *sql.DB }
 
 func New(db *sql.DB) *API { return &API{db: db} }
-
-type Track struct {
-	ID          int64  `json:"id"`
-	Title       string `json:"title"`
-	Artist      string `json:"artist"`
-	AlbumArtist string `json:"album_artist"`
-	Album       string `json:"album"`
-	TrackNo     int    `json:"track_no"`
-	DiscNo      int    `json:"disc_no"`
-	Year        int    `json:"year"`
-	Genre       string `json:"genre"`
-	DurationSec int    `json:"duration_sec"`
-	MediaKind   string `json:"media_kind"`
-	Mime        string `json:"mime"`
-	SpotifyID   string `json:"spotify_id,omitempty"`
-	ExternalURL string `json:"external_url,omitempty"`
-}
-
-const trackCols = `id,title,IFNULL(artist,''),IFNULL(album_artist,''),IFNULL(album,''),IFNULL(track_no,0),IFNULL(disc_no,0),IFNULL(year,0),IFNULL(genre,''),IFNULL(duration_sec,0),media_kind,IFNULL(mime,''),IFNULL(spotify_id,''),IFNULL(external_url,'')`
-
-func scanTrack(rows interface {
-	Scan(...interface{}) error
-}) (Track, error) {
-	var t Track
-	err := rows.Scan(&t.ID, &t.Title, &t.Artist, &t.AlbumArtist, &t.Album, &t.TrackNo, &t.DiscNo, &t.Year, &t.Genre, &t.DurationSec, &t.MediaKind, &t.Mime, &t.SpotifyID, &t.ExternalURL)
-	return t, err
-}
 
 func (a *API) Mount(r chi.Router) {
 	r.Get("/api/library/tracks", a.tracks)
@@ -66,7 +40,7 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	kind := r.URL.Query().Get("kind")
-	q := `SELECT ` + trackCols + ` FROM tracks`
+	q := `SELECT ` + models.TrackCols + ` FROM tracks`
 	args := []interface{}{}
 	if kind != "" {
 		q += ` WHERE media_kind=?`
@@ -80,9 +54,9 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	out := []Track{}
+	out := []models.Track{}
 	for rows.Next() {
-		t, _ := scanTrack(rows)
+		t, _ := models.ScanTrack(rows)
 		out = append(out, t)
 	}
 	writeJSON(w, out)
@@ -161,7 +135,7 @@ func (a *API) podcasts(w http.ResponseWriter, r *http.Request) {
 func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
-		writeJSON(w, []Track{})
+		writeJSON(w, []models.Track{})
 		return
 	}
 	// FTS5: quote terms with AND
@@ -171,7 +145,7 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	}
 	ftsQ := strings.Join(parts, " AND ")
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT t.id,t.title,IFNULL(t.artist,''),IFNULL(t.album_artist,''),IFNULL(t.album,''),IFNULL(t.track_no,0),IFNULL(t.disc_no,0),IFNULL(t.year,0),IFNULL(t.genre,''),IFNULL(t.duration_sec,0),t.media_kind,IFNULL(t.mime,''),IFNULL(t.spotify_id,''),IFNULL(t.external_url,'')
+		SELECT `+models.TrackCols+`
 		FROM tracks_fts f JOIN tracks t ON t.id=f.rowid
 		WHERE tracks_fts MATCH ? ORDER BY rank LIMIT 100`, ftsQ)
 	if err != nil {
@@ -179,9 +153,9 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	out := []Track{}
+	out := []models.Track{}
 	for rows.Next() {
-		t, _ := scanTrack(rows)
+		t, _ := models.ScanTrack(rows)
 		out = append(out, t)
 	}
 	writeJSON(w, out)
@@ -189,8 +163,8 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) track(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	row := a.db.QueryRowContext(r.Context(), `SELECT `+trackCols+` FROM tracks WHERE id=?`, id)
-	t, err := scanTrack(row)
+	row := a.db.QueryRowContext(r.Context(), `SELECT `+models.TrackCols+` FROM tracks WHERE id=?`, id)
+	t, err := models.ScanTrack(row)
 	if err != nil {
 		http.Error(w, "not found", 404)
 		return
