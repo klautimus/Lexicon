@@ -24,8 +24,19 @@ function Step($msg) {
 # 1. Build frontend
 Step "Building frontend..."
 Set-Location $frontend
+
+# npm has a known bug where optional dependencies don't resolve on the
+# first install.  We install, then verify tsc exists; if not, nuke
+# node_modules and retry once (the workaround recommended by npm).
 if (-not (Test-Path "node_modules")) {
-    npm install
+    npm install --include=dev
+}
+$tscExists = (Test-Path "node_modules\\.bin\\tsc.cmd") -or (Test-Path "node_modules\\.bin\\tsc")
+if (-not $tscExists) {
+    Write-Host "npm bug: missing devDependencies. Removing node_modules and retrying..." -ForegroundColor Yellow
+    Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+    Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
+    npm install --include=dev
 }
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" }
