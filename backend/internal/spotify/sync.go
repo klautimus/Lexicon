@@ -86,9 +86,33 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
+	// Collect unique artist IDs
+	artistIDs := make(map[string]bool)
+	for _, item := range rp.Items {
+		for _, artist := range item.Track.Artists {
+			if artist.ID != "" {
+				artistIDs[artist.ID] = true
+			}
+		}
+	}
+
+	// Fetch genres for all artists
+	genreMap := make(map[string]string)
+	if len(artistIDs) > 0 {
+		ids := make([]string, 0, len(artistIDs))
+		for id := range artistIDs {
+			ids = append(ids, id)
+		}
+		var err error
+		genreMap, err = fetchArtistGenres(ctx, access, ids)
+		if err != nil {
+			log.Printf("[spotify] fetch artist genres: %v", err)
+		}
+	}
+
 	imported := 0
 	for _, item := range rp.Items {
-		if err := s.ingestPlay(ctx, item); err != nil {
+		if err := s.ingestPlay(ctx, item, genreMap); err != nil {
 			log.Printf("[spotify] ingest %s: %v", item.Track.ID, err)
 			continue
 		}
@@ -110,7 +134,7 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem) error {
+func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem, genreMap map[string]string) error {
 	t := item.Track
 	if t.ID == "" {
 		return nil
@@ -129,19 +153,28 @@ func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem) error {
 	if t.ExternalURL != nil {
 		externalURL = t.ExternalURL["spotify"]
 	}
+	// Resolve genre from the first artist that has genres
+	genre := ""
+	for _, a := range t.Artists {
+		if g, ok := genreMap[a.ID]; ok && g != "" {
+			genre = g
+			break
+		}
+	}
 
 	// Upsert by spotify_id
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO tracks(path, title, artist, album_artist, album, year, duration_sec, mime, media_kind, spotify_id, external_url)
-		VALUES(NULL, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
+		INSERT INTO tracks(path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, spotify_id, external_url)
+		VALUES(NULL, ?, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
 		ON CONFLICT(spotify_id) DO UPDATE SET
 			title=excluded.title,
 			artist=excluded.artist,
 			album=excluded.album,
 			year=excluded.year,
+			genre=excluded.genre,
 			duration_sec=excluded.duration_sec,
 			external_url=excluded.external_url
-	`, t.Name, artist, artist, album, year, durSec, t.ID, externalURL)
+	`, t.Name, artist, artist, album, year, genre, durSec, t.ID, externalURL)
 	if err != nil {
 		return err
 	}
