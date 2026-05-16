@@ -7,6 +7,7 @@ import {
   ReactNode,
 } from "react";
 import { api, Track } from "../lib/api";
+import { useToast } from "../contexts/ToastContext";
 import {
   spotifyPlayURI,
   spotifyToggle,
@@ -68,6 +69,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const currentRef = useRef<Track | null>(null);
   const originalQueueRef = useRef<Track[]>([]);
   const shuffledRef = useRef<boolean>(false);
+  const toast = useToast();
 
   // ----- Local <audio> setup -----
   useEffect(() => {
@@ -89,16 +91,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setState((s) => (s.source === "local" ? { ...s, playing: true } : s));
     const onPause = () =>
       setState((s) => (s.source === "local" ? { ...s, playing: false } : s));
+    const onError = () => {
+      const a = audioRef.current;
+      const err = a?.error;
+      const msg = err
+        ? `Audio error (code ${err.code}): ${err.message || "unknown"}`
+        : "Audio playback failed";
+      console.error("[player]", msg);
+      toast.error("Playback failed — file may be corrupted or inaccessible");
+      sourceRef.current = null;
+      currentRef.current = null;
+      playSecondsRef.current = 0;
+      setState((s) => ({ ...s, source: null, error: msg, playing: false }));
+    };
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("ended", onEnded);
     a.addEventListener("play", onPlay);
     a.addEventListener("pause", onPause);
+    a.addEventListener("error", onError);
     return () => {
       a.pause();
       a.removeEventListener("timeupdate", onTime);
       a.removeEventListener("ended", onEnded);
       a.removeEventListener("play", onPlay);
       a.removeEventListener("pause", onPause);
+      a.removeEventListener("error", onError);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -204,13 +221,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
 
     // Local file
-    sourceRef.current = "local";
-    setState((s) => ({ ...s, source: "local" }));
     const a = audioRef.current!;
     a.src = api.streamUrl(t.id);
-    a.play().catch(() => {});
-    playStartRef.current = Math.floor(Date.now() / 1000);
-    playSecondsRef.current = 0;
+    a.play()
+      .then(() => {
+        sourceRef.current = "local";
+        setState((s) => ({ ...s, source: "local", error: null }));
+        playStartRef.current = Math.floor(Date.now() / 1000);
+        playSecondsRef.current = 0;
+      })
+      .catch((e: any) => {
+        const msg = e?.message || "Audio playback failed";
+        console.error("[player] play failed:", msg);
+        toast.error("Failed to play track — file may be missing or corrupted");
+        sourceRef.current = null;
+        currentRef.current = null;
+        setState((s) => ({ ...s, source: null, error: msg, playing: false }));
+      });
   }
 
   function shuffleArray<T>(arr: T[]): T[] {
