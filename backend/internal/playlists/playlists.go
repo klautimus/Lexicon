@@ -89,6 +89,10 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&p.ID, &p.Name, &p.TrackCount, &p.TotalDuration, &p.CreatedAt)
 		out = append(out, p)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -139,6 +143,10 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		t, _ := scanTrack(rows)
 		p.Tracks = append(p.Tracks, t)
 		p.TotalDuration += t.DurationSec
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	p.TrackCount = len(p.Tracks)
 	writeJSON(w, p)

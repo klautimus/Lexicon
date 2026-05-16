@@ -3,14 +3,15 @@ package analytics
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 )
 
-type API struct{ db *sql.DB }
+type API struct{ db *sql.DB; timezone string }
 
-func New(db *sql.DB) *API { return &API{db: db} }
+func New(db *sql.DB, timezone string) *API { return &API{db: db, timezone: timezone} }
 
 func (a *API) Mount(r chi.Router) {
 	r.Get("/api/analytics/overview", a.overview)
@@ -45,10 +46,14 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
-	rows, _ := a.db.Query(`
+	rows, err := a.db.Query(`
 		SELECT IFNULL(COALESCE(NULLIF(t.album_artist,''),t.artist),'') AS artist, COUNT(*), IFNULL(SUM(p.duration_played_sec),0)
 		FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	defer rows.Close()
 	type Row struct {
 		Artist    string `json:"artist"`
@@ -61,13 +66,21 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&x.Artist, &x.Plays, &x.ListenSec)
 		out = append(out, x)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
 func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
-	rows, _ := a.db.Query(`
+	rows, err := a.db.Query(`
 		SELECT t.id, t.title, IFNULL(t.artist,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	defer rows.Close()
 	type Row struct {
 		ID     int64  `json:"id"`
@@ -81,13 +94,21 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&x.ID, &x.Title, &x.Artist, &x.Plays)
 		out = append(out, x)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
 func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
-	rows, _ := a.db.Query(`
+	rows, err := a.db.Query(`
 		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	defer rows.Close()
 	type Row struct {
 		Genre string `json:"genre"`
@@ -99,14 +120,26 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&x.Genre, &x.Plays)
 		out = append(out, x)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
 func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
-	rows, _ := a.db.Query(`
-		SELECT CAST(strftime('%w', started_at, 'unixepoch','localtime') AS INTEGER) AS dow,
-		       CAST(strftime('%H', started_at, 'unixepoch','localtime') AS INTEGER) AS hour,
-		       COUNT(*) FROM plays GROUP BY dow, hour`)
+	tzMod := a.timezone
+	if tzMod == "local" {
+		tzMod = "localtime"
+	}
+	q := fmt.Sprintf(`SELECT CAST(strftime('%%w', started_at, 'unixepoch', '%s') AS INTEGER) AS dow,
+	       CAST(strftime('%%H', started_at, 'unixepoch', '%s') AS INTEGER) AS hour,
+	       COUNT(*) FROM plays GROUP BY dow, hour`, tzMod, tzMod)
+	rows, err := a.db.Query(q)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	defer rows.Close()
 	type Cell struct {
 		Dow   int `json:"dow"`
@@ -118,6 +151,10 @@ func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
 		var c Cell
 		rows.Scan(&c.Dow, &c.Hour, &c.Plays)
 		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	writeJSON(w, out)
 }

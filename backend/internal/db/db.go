@@ -135,6 +135,9 @@ func columnExists(db *sql.DB, table, column string) bool {
 			return true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return false
+	}
 	return false
 }
 
