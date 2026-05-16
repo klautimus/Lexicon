@@ -32,7 +32,7 @@ Set-Location $frontend
 # If either is missing the node_modules is corrupt — nuke and retry.
 $tscExists = (Test-Path "node_modules\\.bin\\tsc.cmd") -or (Test-Path "node_modules\\.bin\\tsc")
 $rollupGlob = "node_modules\\@rollup\\rollup-*"
-$rollupExists = (Get-ChildItem -ErrorAction SilentlyContinue $rollupGlob | Where-Object { -not $_.PSIsContainer }).Count -gt 0
+$rollupExists = (Get-ChildItem -ErrorAction SilentlyContinue $rollupGlob | Measure-Object | Select-Object -ExpandProperty Count) -gt 0
 if ((-not $tscExists) -or (-not $rollupExists)) {
     Write-Host "npm bug: node_modules is corrupt (missing devDeps or native modules). Reinstalling..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
