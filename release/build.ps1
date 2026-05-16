@@ -25,17 +25,20 @@ function Step($msg) {
 Step "Building frontend..."
 Set-Location $frontend
 
-# npm has a known bug where optional dependencies don't resolve on the
-# first install.  We install, then verify tsc exists; if not, nuke
-# node_modules and retry once (the workaround recommended by npm).
-if (-not (Test-Path "node_modules")) {
-    npm install --include=dev
-}
+# npm has a known bug (#4828) where optional platform-specific
+# dependencies (@rollup/rollup-*) don't resolve on the first install
+# and can get into a permanently broken state.  We check for both
+# tsc (missing devDeps) and the rollup native module (partial install).
+# If either is missing the node_modules is corrupt — nuke and retry.
 $tscExists = (Test-Path "node_modules\\.bin\\tsc.cmd") -or (Test-Path "node_modules\\.bin\\tsc")
-if (-not $tscExists) {
-    Write-Host "npm bug: missing devDependencies. Removing node_modules and retrying..." -ForegroundColor Yellow
+$rollupGlob = "node_modules\\@rollup\\rollup-*"
+$rollupExists = (Get-ChildItem -ErrorAction SilentlyContinue $rollupGlob | Where-Object { -not $_.PSIsContainer }).Count -gt 0
+if ((-not $tscExists) -or (-not $rollupExists)) {
+    Write-Host "npm bug: node_modules is corrupt (missing devDeps or native modules). Reinstalling..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
     Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
+}
+if (-not (Test-Path "node_modules")) {
     npm install --include=dev
 }
 npm run build
