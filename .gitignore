@@ -1,3 +1,6 @@
+# Git worktrees
+.worktrees/
+
 # Dependencies
 frontend/node_modules/
 backend/vendor/
