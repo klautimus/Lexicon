@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { PlayerProvider } from "./player/PlayerContext";
 import { ToastProvider } from "./contexts/ToastContext";
+import { DownloadProvider } from "./contexts/DownloadContext";
 import PlayerBar from "./components/PlayerBar";
 import MobileNavBar from "./components/MobileNavBar";
 import MobilePlayerBar from "./components/MobilePlayerBar";
@@ -129,7 +130,9 @@ export default function App() {
   return (
     <PlayerProvider>
       <ToastProvider>
-        {isMobile ? <MobileLayout /> : <DesktopLayout />}
+        <DownloadProvider>
+          {isMobile ? <MobileLayout /> : <DesktopLayout />}
+        </DownloadProvider>
       </ToastProvider>
     </PlayerProvider>
   );
