@@ -204,10 +204,16 @@ USER LISTENING PROFILE:
 ` + profile + `
 ---
 REMEMBER: Always return a JSON object with a "message" field.`
-	reply, err := a.deepseekChat(ctx, []map[string]string{
+	reply, err := a.deepseekChatWithRetry(ctx, []map[string]string{
 		{"role": "system", "content": system},
 		{"role": "user", "content": req.Message},
-	}, &dsRespFmt{Type: "json_object"})
+	}, &dsRespFmt{Type: "json_object"}, func(raw string) error {
+		var dummy struct {
+			Message  string          `json:"message"`
+			Playlist PlaylistPayload `json:"playlist"`
+		}
+		return json.Unmarshal([]byte(raw), &dummy)
+	})
 	if err != nil {
 		log.Printf("deepseek chat error: %v", err)
 		http.Error(w, err.Error(), 500)
@@ -309,44 +315,37 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 }
 
 func (a *API) callDeepSeek(ctx context.Context, profile string) (RecsPayload, error) {
-	prompt := `Given this user's listening profile, produce JSON with the following shape exactly:
+	prompt := `You are a music & podcast recommendation engine. Based on the user's listening profile below, recommend 8 songs and 4 podcasts they might enjoy.
+
+` + profile + `
+
+Respond with JSON in this exact format:
 {
-  "summary": "2-3 sentence summary of their taste",
-  "trends": "1-2 sentence note about recent trends",
   "items": [
-    {"title":"...", "artist":"...", "reason":"...", "type":"library|discover"}
-  ]
+    {"title": "...", "artist": "...", "album": "...", "type": "library|discover", "genre": "pop|rock|...", "reason": "..."}
+  ],
+  "summary": "1-2 sentence overview"
 }
 
 Rules:
-- Provide 8-12 items total.
-- "library" items: tracks or podcasts the user ALREADY has in their collection (reference artists/titles from the profile). These should be things worth re-listening to.
-- "discover" items: artists or tracks the user definitely does NOT already have. Pick genuinely new things based on their taste patterns. Do NOT recommend items already mentioned in the profile as "discover".
-- Be specific and personal — reference the data you see.
-- Output ONLY valid JSON, no prose, no code fences.
+- "library" = user has this in their collection
+- "discover" = new suggestion they don't own
+- Be specific — reference listening patterns from the profile
+- Output ONLY valid JSON, no prose, no code fences.`
 
-PROFILE:
-` + profile
-
-	reply, err := a.deepseekChat(ctx, []map[string]string{
+	reply, err := a.deepseekChatWithRetry(ctx, []map[string]string{
 		{"role": "system", "content": "You are a music & podcast recommendation engine. Respond with JSON only."},
 		{"role": "user", "content": prompt},
-	}, nil)
+	}, nil, func(raw string) error {
+		var dummy RecsPayload
+		return json.Unmarshal([]byte(raw), &dummy)
+	})
 	if err != nil {
 		return RecsPayload{}, err
 	}
 
-	// Strip code fences if model added them
-	reply = strings.TrimSpace(reply)
-	reply = strings.TrimPrefix(reply, "```json")
-	reply = strings.TrimPrefix(reply, "```")
-	reply = strings.TrimSuffix(reply, "```")
-	reply = strings.TrimSpace(reply)
-
 	var out RecsPayload
-	if err := json.Unmarshal([]byte(reply), &out); err != nil {
-		return RecsPayload{Summary: reply}, nil // fall back
-	}
+	json.Unmarshal([]byte(reply), &out)
 
 	// Resolve track_id for all items; upgrade "discover" items that exist in library
 	for i, it := range out.Items {
@@ -388,6 +387,65 @@ type dsResponse struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 	} `json:"error,omitempty"`
+}
+
+func (a *API) deepseekChatWithRetry(
+	ctx context.Context,
+	msgs []map[string]string,
+	respFmt *dsRespFmt,
+	parseFn func(string) error,
+) (string, error) {
+	reply, err := a.deepseekChat(ctx, msgs, respFmt)
+	if err != nil {
+		return "", err
+	}
+
+	// Clean up common artifacts
+	reply = strings.TrimSpace(reply)
+	reply = strings.TrimPrefix(reply, "```json")
+	reply = strings.TrimPrefix(reply, "```")
+	reply = strings.TrimSuffix(reply, "```")
+	reply = strings.TrimSpace(reply)
+
+	// Try to parse
+	if err := parseFn(reply); err == nil {
+		return reply, nil
+	}
+
+	// --- Retry once with stricter instructions ---
+	log.Printf("recommender: first parse failed, retrying with stricter prompt. err=%v reply=%q", err, truncate(reply, 200))
+
+	retryMsgs := make([]map[string]string, len(msgs)+1)
+	copy(retryMsgs, msgs)
+	retryMsgs[len(msgs)] = map[string]string{
+		"role":    "user",
+		"content": "Your previous response was not valid JSON and could not be parsed. You MUST respond with ONLY a valid JSON object — no markdown, no code fences, no prose outside the JSON. Return ONLY the JSON object.",
+	}
+
+	reply, err = a.deepseekChat(ctx, retryMsgs, respFmt)
+	if err != nil {
+		return "", fmt.Errorf("retry failed: %w", err)
+	}
+
+	// Clean up again
+	reply = strings.TrimSpace(reply)
+	reply = strings.TrimPrefix(reply, "```json")
+	reply = strings.TrimPrefix(reply, "```")
+	reply = strings.TrimSuffix(reply, "```")
+	reply = strings.TrimSpace(reply)
+
+	if err := parseFn(reply); err != nil {
+		return "", fmt.Errorf("invalid JSON after retry: %w | raw: %s", err, truncate(reply, 200))
+	}
+
+	return reply, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFmt *dsRespFmt) (string, error) {

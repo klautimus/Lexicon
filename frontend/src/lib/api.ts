@@ -13,8 +13,8 @@ export const api = {
   health: () => j<{ ok: boolean }>("/health"),
   scan: () => j<{ started: boolean }>("/scan", { method: "POST" }),
   stats: () => j<Stats>("/library/stats"),
-  tracks: (kind?: string, limit = 200) =>
-    j<Track[]>(`/library/tracks?limit=${limit}${kind ? `&kind=${kind}` : ""}`),
+  tracks: (kind?: string, limit = 200, offset = 0) =>
+    j<TrackListResponse>(`/library/tracks?limit=${limit}&offset=${offset}${kind ? `&kind=${kind}` : ""}`),
   albums: () => j<Album[]>("/library/albums"),
   artists: () => j<Artist[]>("/library/artists"),
   podcasts: () => j<Podcast[]>("/library/podcasts"),
@@ -123,6 +123,11 @@ export interface Track {
   mime: string;
   spotify_id?: string | null;
   external_url?: string | null;
+}
+
+export interface TrackListResponse {
+  tracks: Track[];
+  total: number;
 }
 
 export interface SpotifyStatus {
