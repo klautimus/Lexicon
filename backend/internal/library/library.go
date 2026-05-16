@@ -85,6 +85,10 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 		t, _ := scanTrack(rows)
 		out = append(out, t)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -110,6 +114,10 @@ func (a *API) albums(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&x.Album, &x.Artist, &x.Year, &x.Tracks)
 		out = append(out, x)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -133,6 +141,10 @@ func (a *API) artists(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&x.Artist, &x.Tracks, &x.Albums)
 		out = append(out, x)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, out)
 }
 
@@ -154,6 +166,10 @@ func (a *API) podcasts(w http.ResponseWriter, r *http.Request) {
 		var x Show
 		rows.Scan(&x.Show, &x.Episodes)
 		out = append(out, x)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	writeJSON(w, out)
 }
@@ -183,6 +199,10 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		t, _ := scanTrack(rows)
 		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	writeJSON(w, out)
 }

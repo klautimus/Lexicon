@@ -257,6 +257,9 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 			}
 			fmt.Fprintf(&b, "  - %s (%d plays)\n", a, n)
 		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[recommender] profile top-artists query error: %v", err)
+		}
 		rows.Close()
 	}
 
@@ -273,6 +276,9 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 			rows.Scan(&g, &n)
 			fmt.Fprintf(&b, "  - %s (%d)\n", g, n)
 		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[recommender] profile top-genres query error: %v", err)
+		}
 		rows.Close()
 	}
 
@@ -286,6 +292,9 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 			var t, ar, k string
 			rows.Scan(&t, &ar, &k)
 			fmt.Fprintf(&b, "  - [%s] %s — %s\n", k, t, ar)
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[recommender] profile recent-played query error: %v", err)
 		}
 		rows.Close()
 	}

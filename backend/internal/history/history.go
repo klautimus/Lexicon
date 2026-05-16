@@ -82,6 +82,10 @@ func (a *API) recent(w http.ResponseWriter, r *http.Request) {
 		x.Completed = c == 1
 		out = append(out, x)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 }
