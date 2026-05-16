@@ -120,44 +120,51 @@ type Job struct {
 }
 
 type Config struct {
-	Bin          string // SpotiFLAC binary
-	Output       string
-	FolderFormat string
-	SpotdlBin           string // spotDL binary (fallback)
-	SpotdlFormat        string // mp3, flac, ogg, opus, m4a, wav
-	SpotdlAudio         string // comma-separated audio providers (e.g. "piped,youtube")
-	SpotifyClientID     string // user's Spotify app credentials (used by spotdl to avoid shared rate limit)
-	SpotifyClientSecret string
-	YtdlpBin            string // yt-dlp binary (final fallback — searches YouTube directly, no Spotify)
-	YtdlpFormat         string // mp3, m4a, etc.
-	FfmpegBin           string // ffmpeg path for yt-dlp audio extraction
-	DeepSeekAPIKey      string
-	DeepSeekModel       string
-	DeepSeekThinking    string
-	DeepSeekBaseURL     string
+\tBin          string // SpotiFLAC binary
+\tOutput       string
+\tFolderFormat string
+\tSpotdlBin           string // spotDL binary (fallback)
+\tSpotdlFormat        string // mp3, flac, ogg, opus, m4a, wav
+\tSpotdlAudio         string // comma-separated audio providers (e.g. "piped,youtube")
+\tSpotifyClientID     string // user's Spotify app credentials (used by spotdl to avoid shared rate limit)
+\tSpotifyClientSecret string
+\tYtdlpBin            string // yt-dlp binary (final fallback — searches YouTube directly, no Spotify)
+\tYtdlpFormat         string // mp3, m4a, etc.
+\tFfmpegBin           string // ffmpeg path for yt-dlp audio extraction
+\tDeepSeekAPIKey      string
+\tDeepSeekModel       string
+\tDeepSeekThinking    string
+\tDeepSeekBaseURL     string
+\tDownloadConcurrency int
 }
 
 // RescanFunc is called after a successful download.
 type RescanFunc func()
 
 type API struct {
-	cfg     Config
-	db      *sql.DB
-	rescan  RescanFunc
-	mu      sync.Mutex
-	jobs    map[string]*Job
-	order   []string
-	maxKeep int
+\tcfg     Config
+\tdb      *sql.DB
+\trescan  RescanFunc
+\tmu      sync.Mutex
+\tsema    chan struct{}
+\tjobs    map[string]*Job
+\torder   []string
+\tmaxKeep int
 }
 
 func New(cfg Config, db *sql.DB, rescan RescanFunc) *API {
-	return &API{
-		cfg:     cfg,
-		db:      db,
-		rescan:  rescan,
-		jobs:    map[string]*Job{},
-		maxKeep: 50,
-	}
+\tconcurrency := cfg.DownloadConcurrency
+\tif concurrency <= 0 {
+\t\tconcurrency = 2
+\t}
+\treturn &API{
+\t\tcfg:     cfg,
+\t\tdb:      db,
+\t\trescan:  rescan,
+\t\tjobs:    map[string]*Job{},
+\t\tsema:    make(chan struct{}, concurrency),
+\t\tmaxKeep: 50,
+\t}
 }
 
 func (a *API) configured() bool {
@@ -449,10 +456,22 @@ func (a *API) cancelJob(w http.ResponseWriter, r *http.Request) {
 // ----- subprocess runner -----
 
 func (a *API) run(job *Job) {
-	a.mu.Lock()
-	job.Status = StatusRunning
-	job.Tool = "spotiflac"
-	a.mu.Unlock()
+\t// Acquire semaphore slot (blocks until concurrency limit allows)
+\ta.sema <- struct{}{}
+\tdefer func() { <-a.sema }()
+
+\t// Check if cancelled while waiting for slot
+\ta.mu.Lock()
+\tif job.Status == StatusCancelled {
+\t\ta.mu.Unlock()
+\t\treturn
+\t}
+\ta.mu.Unlock()
+
+\ta.mu.Lock()
+\tjob.Status = StatusRunning
+\tjob.Tool = "spotiflac"
+\ta.mu.Unlock()
 
 	a.appendLog(job, "[spotiflac] starting download")
 	args := []string{"-o", a.cfg.Output}
@@ -634,10 +653,22 @@ func (a *API) run(job *Job) {
 // entirely and goes straight to yt-dlp, optionally using DeepSeek to
 // refine the raw user query into a structured search term.
 func (a *API) runSearch(job *Job) {
-	a.mu.Lock()
-	job.Status = StatusRunning
-	job.Tool = "ytdlp-search"
-	a.mu.Unlock()
+\t// Acquire semaphore slot (blocks until concurrency limit allows)
+\ta.sema <- struct{}{}
+\tdefer func() { <-a.sema }()
+
+\t// Check if cancelled while waiting for slot
+\ta.mu.Lock()
+\tif job.Status == StatusCancelled {
+\t\ta.mu.Unlock()
+\t\treturn
+\t}
+\ta.mu.Unlock()
+
+\ta.mu.Lock()
+\tjob.Status = StatusRunning
+\tjob.Tool = "ytdlp-search"
+\ta.mu.Unlock()
 
 	a.appendLog(job, fmt.Sprintf("[search] query: %s", job.URL))
 

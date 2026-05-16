@@ -1,53 +1,68 @@
 package config
 
-import "os"
+import (
+\t"os"
+\t"strconv"
+)
 
 type Config struct {
-	Port               string
-	DBPath             string
-	MediaRoots         string
-	DeepSeekAPIKey     string
-	DeepSeekModel      string
-	DeepSeekThinking   string
-	DeepSeekBaseURL    string
-	SpotifyClientID     string
-	SpotifyClientSecret string
-	SpotifyRedirectURI  string
-	SpotifyFrontendURL  string
-	SpotiflacBin       string
-	SpotiflacOutput    string
-	SpotiflacFolderFmt string
-	SpotdlBin          string
-	SpotdlFormat       string
-	SpotdlAudio        string
-	YtdlpBin           string
-	YtdlpFormat        string
-	FfmpegBin          string
+\tPort               string
+\tDBPath             string
+\tMediaRoots         string
+\tDeepSeekAPIKey     string
+\tDeepSeekModel      string
+\tDeepSeekThinking   string
+\tDeepSeekBaseURL    string
+\tSpotifyClientID     string
+\tSpotifyClientSecret string
+\tSpotifyRedirectURI  string
+\tSpotifyFrontendURL  string
+\tSpotiflacBin       string
+\tSpotiflacOutput    string
+\tSpotiflacFolderFmt string
+\tSpotdlBin          string
+\tSpotdlFormat       string
+\tSpotdlAudio        string
+\tYtdlpBin           string
+\tYtdlpFormat        string
+\tFfmpegBin          string
+\tDownloadConcurrency int
 }
 
 func Load() Config {
-	return Config{
-		Port:               env("PORT", "8787"),
-		DBPath:             env("DB_PATH", "./data/lexicon.db"),
-		MediaRoots:         env("MEDIA_ROOTS", ""),
-		DeepSeekAPIKey:     env("DEEPSEEK_API_KEY", ""),
-		DeepSeekModel:      env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
-		DeepSeekThinking:   env("DEEPSEEK_THINKING", "medium"),
-		DeepSeekBaseURL:    env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-		SpotifyClientID:     env("SPOTIFY_CLIENT_ID", ""),
-		SpotifyClientSecret: env("SPOTIFY_CLIENT_SECRET", ""),
-		SpotifyRedirectURI:  env("SPOTIFY_REDIRECT_URI", "http://localhost:8787/api/spotify/callback"),
-		SpotifyFrontendURL:  env("SPOTIFY_FRONTEND_URL", ""),
-		SpotiflacBin:       env("SPOTIFLAC_BIN", ""),
-		SpotdlBin:          env("SPOTDL_BIN", ""),
-		SpotdlFormat:       env("SPOTDL_FORMAT", "mp3"),
-		SpotiflacOutput:    env("SPOTIFLAC_OUTPUT", ""),
-		SpotiflacFolderFmt: env("SPOTIFLAC_FOLDER_FORMAT", ""),
-		SpotdlAudio:        env("SPOTDL_AUDIO_PROVIDERS", "piped,youtube,soundcloud,bandcamp"),
-		YtdlpBin:           env("YTDLP_BIN", ""),
-		YtdlpFormat:        env("YTDLP_FORMAT", "mp3"),
-		FfmpegBin:          env("FFMPEG_BIN", ""),
-	}
+\tcfg := Config{
+\t\tPort:               env("PORT", "8787"),
+\t\tDBPath:             env("DB_PATH", "./data/lexicon.db"),
+\t\tMediaRoots:         env("MEDIA_ROOTS", ""),
+\t\tDeepSeekAPIKey:     env("DEEPSEEK_API_KEY", ""),
+\t\tDeepSeekModel:      env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+\t\tDeepSeekThinking:   env("DEEPSEEK_THINKING", "medium"),
+\t\tDeepSeekBaseURL:    env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+\t\tSpotifyClientID:     env("SPOTIFY_CLIENT_ID", ""),
+\t\tSpotifyClientSecret: env("SPOTIFY_CLIENT_SECRET", ""),
+\t\tSpotifyRedirectURI:  env("SPOTIFY_REDIRECT_URI", "http://localhost:8787/api/spotify/callback"),
+\t\tSpotifyFrontendURL:  env("SPOTIFY_FRONTEND_URL", ""),
+\t\tSpotiflacBin:       env("SPOTIFLAC_BIN", ""),
+\t\tSpotdlBin:          env("SPOTDL_BIN", ""),
+\t\tSpotdlFormat:       env("SPOTDL_FORMAT", "mp3"),
+\t\tSpotiflacOutput:    env("SPOTIFLAC_OUTPUT", ""),
+\t\tSpotiflacFolderFmt: env("SPOTIFLAC_FOLDER_FORMAT", ""),
+\t\tSpotdlAudio:        env("SPOTDL_AUDIO_PROVIDERS", "piped,youtube,soundcloud,bandcamp"),
+\t\tYtdlpBin:           env("YTDLP_BIN", ""),
+\t\tYtdlpFormat:        env("YTDLP_FORMAT", "mp3"),
+\t\tFfmpegBin:          env("FFMPEG_BIN", ""),
+\t}
+
+\tif v := os.Getenv("DOWNLOAD_CONCURRENCY"); v != "" {
+\t\tif n, err := strconv.Atoi(v); err == nil && n > 0 {
+\t\t\tcfg.DownloadConcurrency = n
+\t\t}
+\t}
+\tif cfg.DownloadConcurrency <= 0 {
+\t\tcfg.DownloadConcurrency = 2
+\t}
+
+\treturn cfg
 }
 
 func env(key, def string) string {
