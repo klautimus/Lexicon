@@ -25,7 +25,7 @@ function DesktopTable({ tracks, onDelete }: { tracks: Track[]; onDelete?: (track
             <th className="text-left px-4 py-2 w-10">#</th>
             <th className="text-left px-4 py-2">Title</th>
             <th className="text-left px-4 py-2">Artist</th>
-            <th className="text-left px-4 py-2">Album</th>
+            <th className="text-left px-4 py-2 max-w-48">Album</th>
             <th className="text-left px-4 py-2 w-10"></th>
           </tr>
         </thead>
@@ -152,7 +152,7 @@ function TrackRow({
       </td>
       <td className="px-4 py-2 truncate">{track.title}</td>
       <td className="px-4 py-2 text-muted truncate">{track.artist}</td>
-      <td className="px-4 py-2 text-muted truncate">{track.album}</td>
+      <td className="px-4 py-2 text-muted truncate max-w-48" title={track.album}>{track.album}</td>
       <td className="px-4 py-2 relative">
         <div ref={ref}>
           <button
