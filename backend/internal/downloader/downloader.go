@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -120,51 +121,102 @@ type Job struct {
 }
 
 type Config struct {
-\tBin          string // SpotiFLAC binary
-\tOutput       string
-\tFolderFormat string
-\tSpotdlBin           string // spotDL binary (fallback)
-\tSpotdlFormat        string // mp3, flac, ogg, opus, m4a, wav
-\tSpotdlAudio         string // comma-separated audio providers (e.g. "piped,youtube")
-\tSpotifyClientID     string // user's Spotify app credentials (used by spotdl to avoid shared rate limit)
-\tSpotifyClientSecret string
-\tYtdlpBin            string // yt-dlp binary (final fallback — searches YouTube directly, no Spotify)
-\tYtdlpFormat         string // mp3, m4a, etc.
-\tFfmpegBin           string // ffmpeg path for yt-dlp audio extraction
-\tDeepSeekAPIKey      string
-\tDeepSeekModel       string
-\tDeepSeekThinking    string
-\tDeepSeekBaseURL     string
-\tDownloadConcurrency int
+	Bin          string // SpotiFLAC binary
+	Output       string
+	FolderFormat string
+	SpotdlBin           string // spotDL binary (fallback)
+	SpotdlFormat        string // mp3, flac, ogg, opus, m4a, wav
+	SpotdlAudio         string // comma-separated audio providers (e.g. "piped,youtube")
+	SpotifyClientID     string // user's Spotify app credentials (used by spotdl to avoid shared rate limit)
+	SpotifyClientSecret string
+	YtdlpBin            string // yt-dlp binary (final fallback — searches YouTube directly, no Spotify)
+	YtdlpFormat         string // mp3, m4a, etc.
+	FfmpegBin           string // ffmpeg path for yt-dlp audio extraction
+	DeepSeekAPIKey      string
+	DeepSeekModel       string
+	DeepSeekThinking    string
+	DeepSeekBaseURL     string
+	DownloadConcurrency int
 }
 
 // RescanFunc is called after a successful download.
 type RescanFunc func()
 
 type API struct {
-\tcfg     Config
-\tdb      *sql.DB
-\trescan  RescanFunc
-\tmu      sync.Mutex
-\tsema    chan struct{}
-\tjobs    map[string]*Job
-\torder   []string
-\tmaxKeep int
+	cfg     Config
+	db      *sql.DB
+	rescan  RescanFunc
+	mu      sync.Mutex
+	sema    chan struct{}
+	jobs    map[string]*Job
+	order   []string
+	maxKeep int
 }
 
 func New(cfg Config, db *sql.DB, rescan RescanFunc) *API {
-\tconcurrency := cfg.DownloadConcurrency
-\tif concurrency <= 0 {
-\t\tconcurrency = 2
-\t}
-\treturn &API{
-\t\tcfg:     cfg,
-\t\tdb:      db,
-\t\trescan:  rescan,
-\t\tjobs:    map[string]*Job{},
-\t\tsema:    make(chan struct{}, concurrency),
-\t\tmaxKeep: 50,
-\t}
+	concurrency := cfg.DownloadConcurrency
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	a := &API{
+		cfg:     cfg,
+		db:      db,
+		rescan:  rescan,
+		jobs:    map[string]*Job{},
+		sema:    make(chan struct{}, concurrency),
+		maxKeep: 50,
+	}
+	// Startup recovery: mark any jobs left in 'running' status as failed,
+	// then load the most recent N jobs into memory.
+	a.recoverJobs()
+	return a
+}
+
+// recoverJobs runs at startup to clean up stale running jobs from a
+// previous crash and to load the most recent download_jobs into memory.
+func (a *API) recoverJobs() {
+	if a.db == nil {
+		return
+	}
+	// Mark stale running/queued jobs as failed
+	_, _ = a.db.Exec(`UPDATE download_jobs SET status='failed', error='server restarted' WHERE status IN ('running','queued')`)
+
+	// Load the most recent maxKeep jobs into memory
+	rows, err := a.db.Query(`SELECT id, url, output, status, started_at, finished_at, error, tool, used_fallback, is_search, track_id FROM download_jobs ORDER BY created_at DESC LIMIT ?`, a.maxKeep)
+	if err != nil {
+		log.Printf("[downloader] recoverJobs query: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var j Job
+		var finishedAt sql.NullInt64
+		var errStr, tool sql.NullString
+		var usedFallback, isSearch int
+		var trackID sql.NullInt64
+		if err := rows.Scan(&j.ID, &j.URL, &j.Output, &j.Status, &j.StartedAt, &finishedAt, &errStr, &tool, &usedFallback, &isSearch, &trackID); err != nil {
+			log.Printf("[downloader] recoverJobs scan: %v", err)
+			continue
+		}
+		if finishedAt.Valid {
+			j.FinishedAt = finishedAt.Int64
+		}
+		if errStr.Valid {
+			j.Error = errStr.String
+		}
+		if tool.Valid {
+			j.Tool = tool.String
+		}
+		j.UsedFallback = usedFallback == 1
+		j.IsSearch = isSearch == 1
+		if trackID.Valid {
+			j.TrackID = trackID.Int64
+		}
+		j.Log = []string{} // don't restore full log
+		a.jobs[j.ID] = &j
+		a.order = append(a.order, j.ID)
+	}
+	log.Printf("[downloader] recovered %d jobs from database", len(a.jobs))
 }
 
 func (a *API) configured() bool {
@@ -257,6 +309,15 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 		a.order = a.order[:a.maxKeep]
 	}
 	a.mu.Unlock()
+
+	// Persist to database
+	if a.db != nil {
+		_, _ = a.db.Exec(
+			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search) VALUES(?, ?, ?, ?, ?, '', 0)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt)
+		a.evictOldJobs()
+	}
+
 	go a.run(job)
 	writeJSON(w, jobSummary(job))
 }
@@ -366,6 +427,14 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 				a.order = a.order[:a.maxKeep]
 			}
 			a.mu.Unlock()
+
+			// Persist to database
+			if a.db != nil {
+				_, _ = a.db.Exec(
+					`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id) VALUES(?, ?, ?, ?, ?, ?, 1, ?)`,
+					job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID)
+			}
+
 			writeJSON(w, jobSummary(job))
 			return
 		}
@@ -390,6 +459,15 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 		a.order = a.order[:a.maxKeep]
 	}
 	a.mu.Unlock()
+
+	// Persist to database
+	if a.db != nil {
+		_, _ = a.db.Exec(
+			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search) VALUES(?, ?, ?, ?, ?, 1)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt)
+		a.evictOldJobs()
+	}
+
 	go a.runSearch(job)
 	writeJSON(w, jobSummary(job))
 }
@@ -450,28 +528,47 @@ func (a *API) cancelJob(w http.ResponseWriter, r *http.Request) {
 		j.FinishedAt = time.Now().Unix()
 	}
 	a.mu.Unlock()
+	// Persist cancellation to DB
+	if a.db != nil {
+		_, _ = a.db.Exec(`UPDATE download_jobs SET status='cancelled', finished_at=? WHERE id=?`, j.FinishedAt, id)
+	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// evictOldJobs deletes old download_jobs rows from the database when
+// the in-memory order exceeds maxKeep.
+func (a *API) evictOldJobs() {
+	if a.db == nil {
+		return
+	}
+	_, _ = a.db.Exec(`DELETE FROM download_jobs WHERE id NOT IN
+		(SELECT id FROM download_jobs ORDER BY created_at DESC LIMIT ?)`,
+		a.maxKeep)
 }
 
 // ----- subprocess runner -----
 
 func (a *API) run(job *Job) {
-\t// Acquire semaphore slot (blocks until concurrency limit allows)
-\ta.sema <- struct{}{}
-\tdefer func() { <-a.sema }()
+	// Acquire semaphore slot (blocks until concurrency limit allows)
+	a.sema <- struct{}{}
+	defer func() { <-a.sema }()
 
-\t// Check if cancelled while waiting for slot
-\ta.mu.Lock()
-\tif job.Status == StatusCancelled {
-\t\ta.mu.Unlock()
-\t\treturn
-\t}
-\ta.mu.Unlock()
+	// Check if cancelled while waiting for slot
+	a.mu.Lock()
+	if job.Status == StatusCancelled {
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
 
-\ta.mu.Lock()
-\tjob.Status = StatusRunning
-\tjob.Tool = "spotiflac"
-\ta.mu.Unlock()
+	a.mu.Lock()
+	job.Status = StatusRunning
+	job.Tool = "spotiflac"
+	a.mu.Unlock()
+	// Persist status change to DB
+	if a.db != nil {
+		_, _ = a.db.Exec(`UPDATE download_jobs SET status='running', tool='spotiflac' WHERE id=?`, job.ID)
+	}
 
 	a.appendLog(job, "[spotiflac] starting download")
 	args := []string{"-o", a.cfg.Output}
@@ -653,22 +750,26 @@ func (a *API) run(job *Job) {
 // entirely and goes straight to yt-dlp, optionally using DeepSeek to
 // refine the raw user query into a structured search term.
 func (a *API) runSearch(job *Job) {
-\t// Acquire semaphore slot (blocks until concurrency limit allows)
-\ta.sema <- struct{}{}
-\tdefer func() { <-a.sema }()
+	// Acquire semaphore slot (blocks until concurrency limit allows)
+	a.sema <- struct{}{}
+	defer func() { <-a.sema }()
 
-\t// Check if cancelled while waiting for slot
-\ta.mu.Lock()
-\tif job.Status == StatusCancelled {
-\t\ta.mu.Unlock()
-\t\treturn
-\t}
-\ta.mu.Unlock()
+	// Check if cancelled while waiting for slot
+	a.mu.Lock()
+	if job.Status == StatusCancelled {
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
 
-\ta.mu.Lock()
-\tjob.Status = StatusRunning
-\tjob.Tool = "ytdlp-search"
-\ta.mu.Unlock()
+	a.mu.Lock()
+	job.Status = StatusRunning
+	job.Tool = "ytdlp-search"
+	a.mu.Unlock()
+	// Persist status change to DB
+	if a.db != nil {
+		_, _ = a.db.Exec(`UPDATE download_jobs SET status='running', tool='ytdlp-search' WHERE id=?`, job.ID)
+	}
 
 	a.appendLog(job, fmt.Sprintf("[search] query: %s", job.URL))
 
@@ -781,6 +882,20 @@ func (a *API) finish(job *Job, status Status, errMsg string) {
 	job.Status = status
 	job.Error = errMsg
 	job.FinishedAt = time.Now().Unix()
+	// Persist final status to database
+	if a.db != nil {
+		usedFallback := 0
+		if job.UsedFallback {
+			usedFallback = 1
+		}
+		isSearch := 0
+		if job.IsSearch {
+			isSearch = 1
+		}
+		_, _ = a.db.Exec(
+			`UPDATE download_jobs SET status=?, finished_at=?, error=?, tool=?, used_fallback=?, is_search=?, track_id=? WHERE id=?`,
+			string(status), job.FinishedAt, errMsg, job.Tool, usedFallback, isSearch, job.TrackID, job.ID)
+	}
 }
 
 // ----- DeepSeek metadata parser -----

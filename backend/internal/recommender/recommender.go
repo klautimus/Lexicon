@@ -1,19 +1,19 @@
 package recommender
 
 import (
-\t"bytes"
-\t"context"
-\t"crypto/sha256"
-\t"database/sql"
-\t"encoding/json"
-\t"fmt"
-\t"io"
-\t"log"
-\t"net/http"
-\t"strings"
-\t"time"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+	"time"
 
-\t"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5"
 )
 
 type DeepSeekConfig struct {
