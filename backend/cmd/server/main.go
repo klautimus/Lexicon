@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/kevin/lexicon/internal/analytics"
+	"github.com/kevin/lexicon/internal/auth"
 	"github.com/kevin/lexicon/internal/config"
 	"github.com/kevin/lexicon/internal/db"
 	"github.com/kevin/lexicon/internal/downloader"
@@ -129,13 +130,31 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	if os.Getenv("DEV") == "true" {
-		r.Use(cors.Handler(cors.Options{
-			AllowedOrigins: []string{"*"},
-			AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders: []string{"*"},
-		}))
+
+	// CORS: always enabled
+	corsOrigins := []string{"http://localhost:5173", "http://127.0.0.1:5173"}
+	if origins := os.Getenv("CORS_ORIGINS"); origins != "" {
+		corsOrigins = strings.Split(origins, ",")
+		for i := range corsOrigins {
+			corsOrigins[i] = strings.TrimSpace(corsOrigins[i])
+		}
 	}
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   corsOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+	}))
+
+	// API key auth for write operations (POST/PUT/DELETE)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
+				auth.RequireAPIKey(next).ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
 
 	r.Get("/api/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"ok":true}`))
