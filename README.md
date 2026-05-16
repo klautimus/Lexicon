@@ -1,6 +1,6 @@
 # Lexicon
 
-A Plex-like media center for **podcasts and music**, with an LLM (DeepSeek) that watches your listening habits, finds trends, and recommends what to listen to next.
+A Plex-like media center for **podcasts and music**, with an LLM (DeepSeek) that watches your listening habits, finds trends, and recommends what to listen to next and automatically downloads music to your local music library for offline use.
 
 - **Backend:** Go + chi + SQLite (FTS5) — single binary, zero-config
 - **Frontend:** React + Vite + TypeScript + TailwindCSS + Recharts + lucide-react
