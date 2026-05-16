@@ -28,11 +28,21 @@ Set-Location $frontend
 # npm has a known bug (#4828) where optional platform-specific
 # dependencies (@rollup/rollup-*) don't resolve on the first install
 # and can get into a permanently broken state.  We check for both
-# tsc (missing devDeps) and the rollup native module (partial install).
+# tsc (missing devDeps) and the CORRECT platform's rollup native
+# module (a partial install often has Linux modules but not Windows).
 # If either is missing the node_modules is corrupt — nuke and retry.
 $tscExists = (Test-Path "node_modules\\.bin\\tsc.cmd") -or (Test-Path "node_modules\\.bin\\tsc")
-$rollupGlob = "node_modules\\@rollup\\rollup-*"
-$rollupExists = (Get-ChildItem -ErrorAction SilentlyContinue $rollupGlob | Measure-Object | Select-Object -ExpandProperty Count) -gt 0
+
+# Determine which rollup native module we expect on this platform
+if ($IsWindows -or ($env:OS -eq "Windows_NT")) {
+    $rollupNative = "node_modules\\@rollup\\rollup-win32-x64-msvc"
+} elseif ($IsMacOS) {
+    $rollupNative = "node_modules\\@rollup\\rollup-darwin-arm64"
+} else {
+    $rollupNative = "node_modules\\@rollup\\rollup-linux-x64-gnu"
+}
+$rollupExists = Test-Path $rollupNative
+
 if ((-not $tscExists) -or (-not $rollupExists)) {
     Write-Host "npm bug: node_modules is corrupt (missing devDeps or native modules). Reinstalling..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
