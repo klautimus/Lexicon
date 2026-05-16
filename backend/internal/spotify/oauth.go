@@ -50,14 +50,7 @@ func (a *API) authURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if _, err := a.db.ExecContext(r.Context(),
-		`INSERT INTO spotify_pkce(state, code_verifier) VALUES(?,?)`, state, verifier); err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	// Best-effort cleanup of stale PKCE rows older than 1h
-	a.db.ExecContext(r.Context(),
-		`DELETE FROM spotify_pkce WHERE created_at < strftime('%s','now') - 3600`)
+	a.verifiers.Store(state, verifierEntry{Verifier: verifier, CreatedAt: time.Now()})
 
 	q := url.Values{}
 	q.Set("response_type", "code")
@@ -92,12 +85,13 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var verifier string
-	if err := a.db.QueryRowContext(r.Context(),
-		`SELECT code_verifier FROM spotify_pkce WHERE state=?`, state).Scan(&verifier); err != nil {
+	entry, ok := a.verifiers.Load(state)
+	if !ok {
 		http.Error(w, "invalid or expired state", 400)
 		return
 	}
-	a.db.ExecContext(r.Context(), `DELETE FROM spotify_pkce WHERE state=?`, state)
+	verifier = entry.(verifierEntry).Verifier
+	a.verifiers.Delete(state)
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")

@@ -6,9 +6,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
+
+type verifierEntry struct {
+	Verifier  string
+	CreatedAt time.Time
+}
 
 type Config struct {
 	ClientID    string
@@ -17,14 +24,27 @@ type Config struct {
 }
 
 type API struct {
-	db   *sql.DB
-	cfg  Config
-	sync *Syncer
+	db        *sql.DB
+	cfg       Config
+	sync      *Syncer
+	verifiers sync.Map
 }
 
 func New(db *sql.DB, cfg Config) *API {
 	a := &API{db: db, cfg: cfg}
 	a.sync = NewSyncer(db, cfg)
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			cutoff := time.Now().Add(-10 * time.Minute)
+			a.verifiers.Range(func(key, value any) bool {
+				if entry, ok := value.(verifierEntry); ok && entry.CreatedAt.Before(cutoff) {
+					a.verifiers.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 	return a
 }
 
