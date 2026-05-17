@@ -414,8 +414,8 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 	return b.String(), nil
 }
 
-// buildSpotifyProfile fetches the user's Spotify top artists and top tracks
-// to enrich the LLM profile with data from their Spotify account.
+// buildSpotifyProfile fetches the user's Spotify data to enrich the LLM profile.
+// Includes: top artists, top tracks, playlists, saved tracks, and followed artists.
 func (a *API) buildSpotifyProfile(ctx context.Context) string {
 	if a.spotify == nil {
 		return ""
@@ -430,7 +430,7 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 
 	var b strings.Builder
 
-	// Fetch top artists from Spotify
+	// 1. Fetch top artists from Spotify
 	topArtists, err := spotify.FetchTopArtists(ctx, accessToken, 20)
 	if err != nil {
 		log.Printf("[recommender] spotify top artists: %v", err)
@@ -448,7 +448,7 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 		}
 	}
 
-	// Fetch top tracks from Spotify
+	// 2. Fetch top tracks from Spotify
 	topTracks, err := spotify.FetchTopTracks(ctx, accessToken, 20)
 	if err != nil {
 		log.Printf("[recommender] spotify top tracks: %v", err)
@@ -466,7 +466,74 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 		}
 	}
 
+	// 3. Fetch user's playlists (names, descriptions, track counts)
+	playlists, err := spotify.FetchUserPlaylists(ctx, accessToken, 50)
+	if err != nil {
+		log.Printf("[recommender] spotify playlists: %v", err)
+	} else if len(playlists) > 0 {
+		fmt.Fprintln(&b, "User's Spotify Playlists:")
+		for i, pl := range playlists {
+			if i >= 15 {
+				break
+			}
+			visibility := ""
+			if pl.Collaborative {
+				visibility = " (collaborative)"
+			} else if !pl.Public {
+				visibility = " (private)"
+			}
+			desc := ""
+			if pl.Description != "" {
+				desc = fmt.Sprintf(" — %s", truncate(pl.Description, 60))
+			}
+			fmt.Fprintf(&b, "  - %s%s [%d tracks]%s\n", pl.Name, visibility, pl.Tracks.Total, desc)
+		}
+	}
+
+	// 4. Fetch saved/liked tracks (sample of 50 most recent)
+	savedTracks, err := spotify.FetchSavedTracks(ctx, accessToken, 50)
+	if err != nil {
+		log.Printf("[recommender] spotify saved tracks: %v", err)
+	} else if len(savedTracks) > 0 {
+		fmt.Fprintf(&b, "User's Spotify Library: %d saved tracks (showing recent %d)\n", len(savedTracks), min(10, len(savedTracks)))
+		for i, st := range savedTracks {
+			if i >= 10 {
+				break
+			}
+			artists := make([]string, 0, len(st.Track.Artists))
+			for _, a := range st.Track.Artists {
+				artists = append(artists, a.Name)
+			}
+			fmt.Fprintf(&b, "  - %s — %s\n", st.Track.Name, strings.Join(artists, ", "))
+		}
+	}
+
+	// 5. Fetch followed artists
+	followedArtists, err := spotify.FetchFollowedArtists(ctx, accessToken, 50)
+	if err != nil {
+		log.Printf("[recommender] spotify followed artists: %v", err)
+	} else if len(followedArtists) > 0 {
+		fmt.Fprintf(&b, "Followed Artists on Spotify (%d total):\n", len(followedArtists))
+		for i, artist := range followedArtists {
+			if i >= 10 {
+				break
+			}
+			genreStr := ""
+			if len(artist.Genres) > 0 {
+				genreStr = fmt.Sprintf(" [%s]", strings.Join(artist.Genres[:min(2, len(artist.Genres))], ", "))
+			}
+			fmt.Fprintf(&b, "  - %s%s\n", artist.Name, genreStr)
+		}
+	}
+
 	return b.String()
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func min(a, b int) int {
@@ -601,13 +668,6 @@ func (a *API) deepseekChatWithRetry(
 	}
 
 	return reply, nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFmt *dsRespFmt) (string, error) {

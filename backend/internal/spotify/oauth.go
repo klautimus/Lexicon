@@ -19,7 +19,7 @@ const (
 	tokenURL     = "https://accounts.spotify.com/api/token"
 	apiBase      = "https://api.spotify.com/v1"
 
-	scopes = "user-read-recently-played user-top-read user-read-currently-playing user-read-playback-state streaming user-read-email user-read-private"
+	scopes = "user-read-recently-played user-top-read user-read-currently-playing user-read-playback-state streaming user-read-email user-read-private user-library-read playlist-read-private playlist-read-collaborative user-follow-read"
 )
 
 func randB64(n int) (string, error) {

@@ -272,3 +272,113 @@ func FetchTopTracks(ctx context.Context, accessToken string, limit int) (*Spotif
 	}
 	return &result, nil
 }
+
+// SpotifyPlaylist represents a user's playlist
+type SpotifyPlaylist struct {
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ID            string `json:"id"`
+	Public        bool   `json:"public"`
+	Collaborative bool   `json:"collaborative"`
+	Tracks        struct {
+		Total int `json:"total"`
+	} `json:"tracks"`
+}
+
+// SpotifySavedTrack represents a track in the user's library
+type SpotifySavedTrack struct {
+	Track struct {
+		Name    string `json:"name"`
+		Artists []struct {
+			Name string `json:"name"`
+		} `json:"artists"`
+		Album struct {
+			Name string `json:"name"`
+		} `json:"album"`
+	} `json:"track"`
+	AddedAt string `json:"added_at"`
+}
+
+// SpotifyFollowedArtist represents an artist the user follows
+type SpotifyFollowedArtist struct {
+	Name   string   `json:"name"`
+	Genres []string `json:"genres"`
+}
+
+// FetchUserPlaylists fetches the user's playlists
+func FetchUserPlaylists(ctx context.Context, accessToken string, limit int) ([]SpotifyPlaylist, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	resp, err := spotifyGET(ctx, accessToken, "/me/playlists", q)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("user-playlists %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Items []SpotifyPlaylist `json:"items"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+// FetchSavedTracks fetches a sample of the user's saved/liked tracks
+func FetchSavedTracks(ctx context.Context, accessToken string, limit int) ([]SpotifySavedTrack, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	resp, err := spotifyGET(ctx, accessToken, "/me/tracks", q)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("saved-tracks %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Items []SpotifySavedTrack `json:"items"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+// FetchFollowedArtists fetches artists the user follows
+func FetchFollowedArtists(ctx context.Context, accessToken string, limit int) ([]SpotifyFollowedArtist, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("type", "artist")
+	resp, err := spotifyGET(ctx, accessToken, "/me/following", q)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("followed-artists %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Artists struct {
+			Items []SpotifyFollowedArtist `json:"items"`
+		} `json:"artists"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return result.Artists.Items, nil
+}
