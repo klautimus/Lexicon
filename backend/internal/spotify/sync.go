@@ -162,27 +162,27 @@ func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem, genreMap map[s
 		}
 	}
 
-	// Upsert by spotify_id
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO tracks(path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, spotify_id, external_url)
-		VALUES('spotify:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
-		ON CONFLICT(spotify_id) DO UPDATE SET
-			title=excluded.title,
-			artist=excluded.artist,
-			album=excluded.album,
-			year=excluded.year,
-			genre=excluded.genre,
-			duration_sec=excluded.duration_sec,
-			external_url=excluded.external_url
-	`, t.ID, t.Name, artist, artist, album, year, genre, durSec, t.ID, externalURL)
-	if err != nil {
-		return err
-	}
-	_ = res
-
+	// Upsert by spotify_id — explicit SELECT/UPDATE/INSERT avoids SQLite partial-index ON CONFLICT limitation
 	var trackID int64
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM tracks WHERE spotify_id=?`, t.ID).Scan(&trackID); err != nil {
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM tracks WHERE spotify_id=?`, t.ID).Scan(&trackID)
+	if err == sql.ErrNoRows {
+		res, err := s.db.ExecContext(ctx, `
+			INSERT INTO tracks(path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, spotify_id, external_url)
+			VALUES('spotify:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
+		`, t.ID, t.Name, artist, artist, album, year, genre, durSec, t.ID, externalURL)
+		if err != nil {
+			return err
+		}
+		trackID, _ = res.LastInsertId()
+	} else if err != nil {
 		return err
+	} else {
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE tracks SET title=?, artist=?, album_artist=?, album=?, year=?, genre=?, duration_sec=?, external_url=?
+			WHERE spotify_id=?`, t.Name, artist, artist, album, year, genre, durSec, externalURL, t.ID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Avoid duplicate plays with same (track, started_at)

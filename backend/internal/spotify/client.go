@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -161,38 +162,29 @@ func fetchArtistGenres(ctx context.Context, accessToken string, artistIDs []stri
 	if len(artistIDs) == 0 {
 		return nil, nil
 	}
-	const batchSize = 50
 	genreMap := make(map[string]string)
-	for i := 0; i < len(artistIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(artistIDs) {
-			end = len(artistIDs)
-		}
-		batch := artistIDs[i:end]
-		q := url.Values{}
-		q.Set("ids", strings.Join(batch, ","))
-		resp, err := spotifyGET(ctx, accessToken, "/artists", q)
+	for _, id := range artistIDs {
+		resp, err := spotifyGET(ctx, accessToken, "/artists/"+id, nil)
 		if err != nil {
-			return genreMap, fmt.Errorf("fetch artists batch %d: %w", i/batchSize, err)
+			log.Printf("[spotify] fetch artist %s: %v", id, err)
+			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			return genreMap, fmt.Errorf("artists API %d: %s", resp.StatusCode, string(body))
+			log.Printf("[spotify] fetch artist %s: HTTP %d", id, resp.StatusCode)
+			continue
 		}
-		var result struct {
-			Artists []struct {
-				ID     string   `json:"id"`
-				Genres []string `json:"genres"`
-			} `json:"artists"`
+		var artist struct {
+			ID     string   `json:"id"`
+			Genres []string `json:"genres"`
 		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			return genreMap, fmt.Errorf("parse artists response: %w", err)
+		if err := json.Unmarshal(body, &artist); err != nil {
+			log.Printf("[spotify] parse artist %s: %v", id, err)
+			continue
 		}
-		for _, artist := range result.Artists {
-			if len(artist.Genres) > 0 {
-				genreMap[artist.ID] = strings.Join(artist.Genres, ", ")
-			}
+		if len(artist.Genres) > 0 {
+			genreMap[artist.ID] = strings.Join(artist.Genres, ", ")
 		}
 	}
 	return genreMap, nil
