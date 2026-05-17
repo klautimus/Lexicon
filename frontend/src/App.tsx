@@ -17,6 +17,7 @@ import { DownloadProvider } from "./contexts/DownloadContext";
 import PlayerBar from "./components/PlayerBar";
 import MobileNavBar from "./components/MobileNavBar";
 import MobilePlayerBar from "./components/MobilePlayerBar";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useIsMobile } from "./hooks/useIsMobile";
 import HomePage from "./pages/HomePage";
 import MusicPage from "./pages/MusicPage";
@@ -128,12 +129,14 @@ function MobileLayout() {
 export default function App() {
   const isMobile = useIsMobile();
   return (
-    <PlayerProvider>
+    <ErrorBoundary>
       <ToastProvider>
-        <DownloadProvider>
-          {isMobile ? <MobileLayout /> : <DesktopLayout />}
-        </DownloadProvider>
+        <PlayerProvider>
+          <DownloadProvider>
+            {isMobile ? <MobileLayout /> : <DesktopLayout />}
+          </DownloadProvider>
+        </PlayerProvider>
       </ToastProvider>
-    </PlayerProvider>
+    </ErrorBoundary>
   );
 }

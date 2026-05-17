@@ -38,7 +38,7 @@ func main() {
 
 	cfg := config.Load()
 	if cfg.SpotifyFrontendURL == "" {
-		cfg.SpotifyFrontendURL = "http://localhost:" + cfg.Port
+		cfg.SpotifyFrontendURL = "http://127.0.0.1:" + cfg.Port
 	}
 
 	database, err := db.Open(cfg.DBPath)
@@ -204,6 +204,10 @@ func main() {
 		Addr:              ":" + cfg.Port,
 		Handler:           parentHandler,
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	if cfg.SpotifyClientID != "" {
+		log.Printf("[spotify] redirect_uri=%s", cfg.SpotifyRedirectURI)
 	}
 
 	go func() {

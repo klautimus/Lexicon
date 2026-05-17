@@ -94,7 +94,7 @@ export default function SettingsPage() {
               <li>
                 Add redirect URI:{" "}
                 <code className="text-accent">
-                  http://localhost:8787/api/spotify/callback
+                  http://127.0.0.1:8787/api/spotify/callback
                 </code>
               </li>
               <li>

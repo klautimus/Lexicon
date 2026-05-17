@@ -165,7 +165,7 @@ func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem, genreMap map[s
 	// Upsert by spotify_id
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO tracks(path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, spotify_id, external_url)
-		VALUES(NULL, ?, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
+		VALUES('spotify:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
 		ON CONFLICT(spotify_id) DO UPDATE SET
 			title=excluded.title,
 			artist=excluded.artist,
@@ -174,7 +174,7 @@ func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem, genreMap map[s
 			genre=excluded.genre,
 			duration_sec=excluded.duration_sec,
 			external_url=excluded.external_url
-	`, t.Name, artist, artist, album, year, genre, durSec, t.ID, externalURL)
+	`, t.ID, t.Name, artist, artist, album, year, genre, durSec, t.ID, externalURL)
 	if err != nil {
 		return err
 	}

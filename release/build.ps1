@@ -66,6 +66,7 @@ Copy-Item -Recurse (Join-Path $frontend "dist") $embedDist
 Step "Building Go backend (single binary with embedded frontend)..."
 Set-Location $backend
 $binary = Join-Path $release "lexicon.exe"
+go clean -cache
 go build -ldflags "-s -w" -o $binary ./cmd/server
 if ($LASTEXITCODE -ne 0) { throw "Go build failed" }
 Write-Host "Binary: $binary ($((Get-Item $binary).Length / 1MB) MB)"

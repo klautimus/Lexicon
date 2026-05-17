@@ -42,7 +42,7 @@ func Load() Config {
 		DeepSeekBaseURL:    env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 		SpotifyClientID:     env("SPOTIFY_CLIENT_ID", ""),
 		SpotifyClientSecret: env("SPOTIFY_CLIENT_SECRET", ""),
-		SpotifyRedirectURI:  env("SPOTIFY_REDIRECT_URI", "http://localhost:8787/api/spotify/callback"),
+		SpotifyRedirectURI:  env("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8787/api/spotify/callback"),
 		SpotifyFrontendURL:  env("SPOTIFY_FRONTEND_URL", ""),
 		SpotiflacBin:       env("SPOTIFLAC_BIN", ""),
 		SpotdlBin:          env("SPOTDL_BIN", ""),

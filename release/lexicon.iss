@@ -267,13 +267,13 @@ begin
       'DEEPSEEK_MODEL=deepseek-v4-flash' + #13#10 +
       'DEEPSEEK_THINKING=medium' + #13#10 +
       'DEEPSEEK_BASE_URL=https://api.deepseek.com' + #13#10 +
-      'SPOTIFY_FRONTEND_URL=http://localhost:' + FrontendPortEdit.Text + #13#10;
+      'SPOTIFY_FRONTEND_URL=http://127.0.0.1:' + FrontendPortEdit.Text + #13#10;
 
     if SpotifyClientIDEdit.Text <> '' then
       envContent := envContent + 'SPOTIFY_CLIENT_ID=' + SpotifyClientIDEdit.Text + #13#10;
     if SpotifyClientSecretEdit.Text <> '' then
       envContent := envContent + 'SPOTIFY_CLIENT_SECRET=' + SpotifyClientSecretEdit.Text + #13#10;
-    envContent := envContent + 'SPOTIFY_REDIRECT_URI=http://localhost:' + BackendPortEdit.Text + '/api/spotify/callback' + #13#10;
+    envContent := envContent + 'SPOTIFY_REDIRECT_URI=http://127.0.0.1:' + BackendPortEdit.Text + '/api/spotify/callback' + #13#10;
 
     // Bundled tool paths (always write — tools are bundled with the installer)
     if FileExists(ExpandConstant('{app}\tools\spotiflac.exe')) then
