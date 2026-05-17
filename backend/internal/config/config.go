@@ -28,6 +28,7 @@ type Config struct {
 	YtdlpFormat        string
 	FfmpegBin          string
 	DownloadConcurrency int
+	WebSearchEnabled   bool
 }
 
 func Load() Config {
@@ -53,6 +54,7 @@ func Load() Config {
 		YtdlpBin:           env("YTDLP_BIN", ""),
 		YtdlpFormat:        env("YTDLP_FORMAT", "mp3"),
 		FfmpegBin:          env("FFMPEG_BIN", ""),
+		WebSearchEnabled:   env("WEBSEARCH_ENABLED", "true") == "true",
 	}
 
 	if v := os.Getenv("DOWNLOAD_CONCURRENCY"); v != "" {

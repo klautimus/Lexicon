@@ -28,6 +28,7 @@ import (
 	"github.com/kevin/lexicon/internal/scanner"
 	"github.com/kevin/lexicon/internal/spotify"
 	"github.com/kevin/lexicon/internal/streamer"
+	"github.com/kevin/lexicon/internal/websearch"
 )
 
 //go:embed all:dist
@@ -57,12 +58,13 @@ func main() {
 	strm := streamer.New(database)
 	hist := history.New(database)
 	analyt := analytics.New(database, cfg.Timezone)
+	ws := websearch.New(cfg.WebSearchEnabled)
 	rec := recommender.New(database, recommender.DeepSeekConfig{
 		APIKey:   cfg.DeepSeekAPIKey,
 		Model:    cfg.DeepSeekModel,
 		Thinking: cfg.DeepSeekThinking,
 		BaseURL:  cfg.DeepSeekBaseURL,
-	})
+	}, ws)
 	spotifyAPI := spotify.New(database, spotify.Config{
 		ClientID:    cfg.SpotifyClientID,
 		RedirectURI: cfg.SpotifyRedirectURI,

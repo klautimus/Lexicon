@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/websearch"
 )
 
 type DeepSeekConfig struct {
@@ -26,13 +27,14 @@ type DeepSeekConfig struct {
 type API struct {
 	db  *sql.DB
 	cfg DeepSeekConfig
+	ws  *websearch.WebSearch
 }
 
-func New(db *sql.DB, cfg DeepSeekConfig) *API {
+func New(db *sql.DB, cfg DeepSeekConfig, ws *websearch.WebSearch) *API {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.deepseek.com"
 	}
-	return &API{db: db, cfg: cfg}
+	return &API{db: db, cfg: cfg, ws: ws}
 }
 
 func (a *API) Mount(r chi.Router) {
@@ -150,6 +152,27 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Web search enrichment: try to find latest album tracks from top artist
+	searchContext := ""
+	if a.ws != nil {
+		if topArtist := a.extractTopArtist(profile); topArtist != "" {
+			tracks, err := a.ws.ResolveLatestAlbumTracks(ctx, topArtist)
+			if err != nil {
+				log.Printf("[websearch] latest album error: %v", err)
+			}
+			if len(tracks) > 0 {
+				var sb strings.Builder
+				sb.WriteString("\n--- WEB SEARCH RESULTS ---\n")
+				sb.WriteString(fmt.Sprintf("Latest album by %s: %s\nTracks found online:\n", topArtist, tracks[0].Album))
+				for i, t := range tracks {
+					sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, t.Title))
+				}
+				sb.WriteString("--- END SEARCH RESULTS ---\n")
+				searchContext = sb.String()
+			}
+		}
+	}
+
 	prompt := `Given this user's listening profile, generate a cohesive playlist.
 Return ONLY valid JSON with this exact shape:
 {
@@ -166,7 +189,7 @@ Rules:
 - Mix of songs the user likely has and new discoveries
 - Be specific and personal — reference patterns from the profile
 - Output ONLY valid JSON, no prose, no code fences.
-
+` + searchContext + `
 PROFILE:
 ` + profile
 
@@ -219,6 +242,30 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	profile, _ := a.buildProfile(ctx)
+
+	// Web search enrichment for album/artist queries
+	searchContext := ""
+	if q := websearch.DetectSearchQuery(req.Message); q != "" && a.ws != nil {
+		tracks, err := a.ws.ResolveAlbumTracks(ctx, q, "")
+		if err != nil {
+			log.Printf("[websearch] album resolve error: %v", err)
+		}
+		if len(tracks) == 0 {
+			// Try latest album by inferred artist
+			tracks, _ = a.ws.ResolveLatestAlbumTracks(ctx, q)
+		}
+		if len(tracks) > 0 {
+			var sb strings.Builder
+			sb.WriteString("\n--- WEB SEARCH RESULTS ---\n")
+			sb.WriteString(fmt.Sprintf("Album: %s by %s\nTracks found online:\n", tracks[0].Album, tracks[0].Artist))
+			for i, t := range tracks {
+				sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, t.Title))
+			}
+			sb.WriteString("--- END SEARCH RESULTS ---\n")
+			searchContext = sb.String()
+		}
+	}
+
 	system := `You are a music curator. ALWAYS respond with ONLY a single valid JSON object. No markdown, no prose outside the JSON, no code fences.
 
 If the user asks for a playlist, use this shape:
@@ -232,7 +279,7 @@ Rules:
 - For normal questions: answer concisely in the "message" field.
 - ALWAYS include the "message" field.
 - NEVER output text outside the JSON object.
-
+` + searchContext + `
 ---
 USER LISTENING PROFILE:
 ` + profile + `
@@ -530,6 +577,33 @@ func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFm
 		return "", fmt.Errorf("empty response from model")
 	}
 	return content, nil
+}
+
+// extractTopArtist parses the first artist from the "Top artists (90d):" section
+// of the profile text, returning "" if not found.
+func (a *API) extractTopArtist(profile string) string {
+	lines := strings.Split(profile, "\n")
+	inTop := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Top artists (90d):") {
+			inTop = true
+			continue
+		}
+		if inTop && strings.HasPrefix(line, "  - ") {
+			// Line format: "  - Artist Name (N plays)"
+			name := strings.TrimPrefix(line, "  - ")
+			if idx := strings.LastIndex(name, " ("); idx > 0 {
+				name = name[:idx]
+			}
+			return strings.TrimSpace(name)
+		}
+		if inTop && line != "" && !strings.HasPrefix(line, "  - ") {
+			// Section ended
+			break
+		}
+	}
+	return ""
 }
 
 // hashProfile returns a 16-char hex prefix of SHA-256 of the profile text,
