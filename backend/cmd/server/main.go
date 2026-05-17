@@ -62,17 +62,20 @@ func main() {
 	hist := history.New(database)
 	analyt := analytics.New(database, cfg.Timezone)
 	ws := websearch.New(cfg.WebSearchEnabled)
-	rec := recommender.New(database, recommender.DeepSeekConfig{
-		APIKey:   cfg.DeepSeekAPIKey,
-		Model:    cfg.DeepSeekModel,
-		Thinking: cfg.DeepSeekThinking,
-		BaseURL:  cfg.DeepSeekBaseURL,
-	}, ws)
+
+	// Create Spotify API first so we can pass it to the recommender
 	spotifyAPI := spotify.New(database, spotify.Config{
 		ClientID:    cfg.SpotifyClientID,
 		RedirectURI: cfg.SpotifyRedirectURI,
 		FrontendURL: cfg.SpotifyFrontendURL,
 	})
+
+	rec := recommender.New(database, recommender.DeepSeekConfig{
+		APIKey:   cfg.DeepSeekAPIKey,
+		Model:    cfg.DeepSeekModel,
+		Thinking: cfg.DeepSeekThinking,
+		BaseURL:  cfg.DeepSeekBaseURL,
+	}, ws, spotifyAPI)
 
 	// Helper closure used by both the rescan endpoint and the downloader
 	doRescan := func() {

@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// validAccessToken returns a non-expired access token, refreshing if necessary.
-func (a *API) validAccessToken(ctx context.Context) (string, error) {
+// ValidAccessToken returns a non-expired access token, refreshing if necessary.
+func (a *API) ValidAccessToken(ctx context.Context) (string, error) {
 	return ensureToken(ctx, a.db, a.cfg.ClientID)
 }
 
@@ -163,29 +163,112 @@ func fetchArtistGenres(ctx context.Context, accessToken string, artistIDs []stri
 		return nil, nil
 	}
 	genreMap := make(map[string]string)
-	for _, id := range artistIDs {
-		resp, err := spotifyGET(ctx, accessToken, "/artists/"+id, nil)
+	// Batch in groups of 20 (Spotify API limit for /artists endpoint)
+	for i := 0; i < len(artistIDs); i += 20 {
+		end := i + 20
+		if end > len(artistIDs) {
+			end = len(artistIDs)
+		}
+		batch := artistIDs[i:end]
+		ids := strings.Join(batch, ",")
+		resp, err := spotifyGET(ctx, accessToken, "/artists?ids="+ids, nil)
 		if err != nil {
-			log.Printf("[spotify] fetch artist %s: %v", id, err)
+			log.Printf("[spotify] fetch artists batch: %v", err)
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			log.Printf("[spotify] fetch artist %s: HTTP %d", id, resp.StatusCode)
+			log.Printf("[spotify] fetch artists batch: HTTP %d", resp.StatusCode)
 			continue
 		}
-		var artist struct {
-			ID     string   `json:"id"`
-			Genres []string `json:"genres"`
+		var result struct {
+			Artists []struct {
+				ID     string   `json:"id"`
+				Genres []string `json:"genres"`
+			} `json:"artists"`
 		}
-		if err := json.Unmarshal(body, &artist); err != nil {
-			log.Printf("[spotify] parse artist %s: %v", id, err)
+		if err := json.Unmarshal(body, &result); err != nil {
+			log.Printf("[spotify] parse artists batch: %v", err)
 			continue
 		}
-		if len(artist.Genres) > 0 {
-			genreMap[artist.ID] = strings.Join(artist.Genres, ", ")
+		for _, artist := range result.Artists {
+			if len(artist.Genres) > 0 {
+				genreMap[artist.ID] = strings.Join(artist.Genres, ", ")
+			}
 		}
 	}
 	return genreMap, nil
+}
+
+// SpotifyTopArtists represents a user's top artists from Spotify
+type SpotifyTopArtists struct {
+	Items []struct {
+		Name    string `json:"name"`
+		Genres  []string `json:"genres"`
+		Images  []struct {
+			URL string `json:"url"`
+		} `json:"images"`
+	} `json:"items"`
+}
+
+// SpotifyTopTracks represents a user's top tracks from Spotify
+type SpotifyTopTracks struct {
+	Items []struct {
+		Name    string `json:"name"`
+		Artists []struct {
+			Name string `json:"name"`
+		} `json:"artists"`
+		Album struct {
+			Name string `json:"name"`
+		} `json:"album"`
+	} `json:"items"`
+}
+
+// FetchTopArtists fetches the user's top artists from Spotify
+func FetchTopArtists(ctx context.Context, accessToken string, limit int) (*SpotifyTopArtists, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("time_range", "medium_term") // last 6 months
+	resp, err := spotifyGET(ctx, accessToken, "/me/top/artists", q)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("top-artists %d: %s", resp.StatusCode, string(body))
+	}
+	var result SpotifyTopArtists
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// FetchTopTracks fetches the user's top tracks from Spotify
+func FetchTopTracks(ctx context.Context, accessToken string, limit int) (*SpotifyTopTracks, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := url.Values{}
+	q.Set("limit", strconv.Itoa(limit))
+	q.Set("time_range", "medium_term")
+	resp, err := spotifyGET(ctx, accessToken, "/me/top/tracks", q)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("top-tracks %d: %s", resp.StatusCode, string(body))
+	}
+	var result SpotifyTopTracks
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/spotify"
 	"github.com/kevin/lexicon/internal/websearch"
 )
 
@@ -25,16 +26,17 @@ type DeepSeekConfig struct {
 }
 
 type API struct {
-	db  *sql.DB
-	cfg DeepSeekConfig
-	ws  *websearch.WebSearch
+	db     *sql.DB
+	cfg    DeepSeekConfig
+	ws     *websearch.WebSearch
+	spotify *spotify.API
 }
 
-func New(db *sql.DB, cfg DeepSeekConfig, ws *websearch.WebSearch) *API {
+func New(db *sql.DB, cfg DeepSeekConfig, ws *websearch.WebSearch, spotifyAPI *spotify.API) *API {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.deepseek.com"
 	}
-	return &API{db: db, cfg: cfg, ws: ws}
+	return &API{db: db, cfg: cfg, ws: ws, spotify: spotifyAPI}
 }
 
 func (a *API) Mount(r chi.Router) {
@@ -100,6 +102,15 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+
+	// Enrich profile with Spotify top data if connected
+	if a.spotify != nil {
+		spotifyProfile := a.buildSpotifyProfile(ctx)
+		if spotifyProfile != "" {
+			profile = profile + "\n" + spotifyProfile
+		}
+	}
+
 	payload, err := a.callDeepSeek(ctx, profile)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -242,6 +253,14 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	profile, _ := a.buildProfile(ctx)
+
+	// Enrich profile with Spotify top data if connected
+	if a.spotify != nil {
+		spotifyProfile := a.buildSpotifyProfile(ctx)
+		if spotifyProfile != "" {
+			profile = profile + "\n" + spotifyProfile
+		}
+	}
 
 	// Web search enrichment for album/artist queries
 	searchContext := ""
@@ -393,6 +412,68 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 	fmt.Fprintf(&b, "Library: %d tracks, %d artists.\n", tCount, aCount)
 
 	return b.String(), nil
+}
+
+// buildSpotifyProfile fetches the user's Spotify top artists and top tracks
+// to enrich the LLM profile with data from their Spotify account.
+func (a *API) buildSpotifyProfile(ctx context.Context) string {
+	if a.spotify == nil {
+		return ""
+	}
+
+	// Get a valid access token
+	accessToken, err := a.spotify.ValidAccessToken(ctx)
+	if err != nil {
+		log.Printf("[recommender] spotify token: %v", err)
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Fetch top artists from Spotify
+	topArtists, err := spotify.FetchTopArtists(ctx, accessToken, 20)
+	if err != nil {
+		log.Printf("[recommender] spotify top artists: %v", err)
+	} else if len(topArtists.Items) > 0 {
+		fmt.Fprintln(&b, "Spotify Top Artists (last 6 months):")
+		for i, artist := range topArtists.Items {
+			if i >= 10 {
+				break
+			}
+			genreStr := ""
+			if len(artist.Genres) > 0 {
+				genreStr = fmt.Sprintf(" [%s]", strings.Join(artist.Genres[:min(3, len(artist.Genres))], ", "))
+			}
+			fmt.Fprintf(&b, "  - %s%s\n", artist.Name, genreStr)
+		}
+	}
+
+	// Fetch top tracks from Spotify
+	topTracks, err := spotify.FetchTopTracks(ctx, accessToken, 20)
+	if err != nil {
+		log.Printf("[recommender] spotify top tracks: %v", err)
+	} else if len(topTracks.Items) > 0 {
+		fmt.Fprintln(&b, "Spotify Top Tracks (last 6 months):")
+		for i, track := range topTracks.Items {
+			if i >= 10 {
+				break
+			}
+			artists := make([]string, 0, len(track.Artists))
+			for _, a := range track.Artists {
+				artists = append(artists, a.Name)
+			}
+			fmt.Fprintf(&b, "  - %s — %s\n", track.Name, strings.Join(artists, ", "))
+		}
+	}
+
+	return b.String()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (a *API) callDeepSeek(ctx context.Context, profile string) (RecsPayload, error) {

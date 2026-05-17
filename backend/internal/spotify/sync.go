@@ -207,7 +207,7 @@ func (a *API) manualSync(w http.ResponseWriter, r *http.Request) {
 
 // SDK token mint
 func (a *API) sdkToken(w http.ResponseWriter, r *http.Request) {
-	access, err := a.validAccessToken(r.Context())
+	access, err := a.ValidAccessToken(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
