@@ -22,6 +22,12 @@ export default function DownloadsPage() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const pollRef = useRef<number | null>(null);
+  const expandedRef = useRef<Record<string, boolean>>(expanded);
+
+  // Keep expandedRef in sync with expanded state
+  useEffect(() => {
+    expandedRef.current = expanded;
+  }, [expanded]);
 
   async function refresh() {
     try {
@@ -32,8 +38,9 @@ export default function DownloadsPage() {
       setStatus(s);
       setJobs(j);
       // Pull full log for any expanded job that's running
-      for (const id of Object.keys(expanded)) {
-        if (expanded[id]) {
+      const currentExpanded = expandedRef.current;
+      for (const id of Object.keys(currentExpanded)) {
+        if (currentExpanded[id]) {
           api
             .downloadJob(id)
             .then((full) =>
@@ -54,7 +61,7 @@ export default function DownloadsPage() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded]);
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

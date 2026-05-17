@@ -34,19 +34,19 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		CompletedPct int `json:"completed_pct"`
 	}
 	var o O
-	a.db.QueryRow(`SELECT COUNT(*) FROM plays`).Scan(&o.TotalPlays)
-	a.db.QueryRow(`SELECT COUNT(DISTINCT track_id) FROM plays`).Scan(&o.UniqueTracks)
-	a.db.QueryRow(`SELECT IFNULL(SUM(duration_played_sec),0) FROM plays`).Scan(&o.ListenSec)
+	a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plays`).Scan(&o.TotalPlays)
+	a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT track_id) FROM plays`).Scan(&o.UniqueTracks)
+	a.db.QueryRowContext(r.Context(), `SELECT IFNULL(SUM(duration_played_sec),0) FROM plays`).Scan(&o.ListenSec)
 	if o.TotalPlays > 0 {
 		var c int
-		a.db.QueryRow(`SELECT SUM(completed) FROM plays`).Scan(&c)
+		a.db.QueryRowContext(r.Context(), `SELECT SUM(completed) FROM plays`).Scan(&c)
 		o.CompletedPct = c * 100 / o.TotalPlays
 	}
 	writeJSON(w, o)
 }
 
 func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`
+	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT IFNULL(COALESCE(NULLIF(t.album_artist,''),t.artist),'') AS artist, COUNT(*), IFNULL(SUM(p.duration_played_sec),0)
 		FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`)
@@ -74,7 +74,7 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`
+	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT t.id, t.title, IFNULL(t.artist,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
@@ -102,7 +102,7 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.Query(`
+	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`)
 	if err != nil {
@@ -135,7 +135,7 @@ func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
 	q := fmt.Sprintf(`SELECT CAST(strftime('%%w', started_at, 'unixepoch', '%s') AS INTEGER) AS dow,
 	       CAST(strftime('%%H', started_at, 'unixepoch', '%s') AS INTEGER) AS hour,
 	       COUNT(*) FROM plays GROUP BY dow, hour`, tzMod, tzMod)
-	rows, err := a.db.Query(q)
+	rows, err := a.db.QueryContext(r.Context(), q)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return

@@ -598,7 +598,6 @@ func (a *API) run(job *Job) {
 	}
 
 	if primaryErr == nil {
-		a.validateOutput(job)
 		a.finish(job, StatusSucceeded, "")
 		if a.rescan != nil {
 			go a.rescan()
@@ -662,7 +661,6 @@ func (a *API) run(job *Job) {
 	}
 
 	if fallbackErr == nil {
-		a.validateOutput(job)
 		a.finish(job, StatusSucceeded, "")
 		if a.rescan != nil {
 			go a.rescan()
@@ -744,7 +742,6 @@ func (a *API) run(job *Job) {
 		a.finish(job, StatusFailed, fmt.Sprintf("all tools failed. spotiflac: %s; yt-dlp: %s; spotdl: %s", primaryErr.Error(), fallbackErr.Error(), spotdlErr.Error()))
 		return
 	}
-	a.validateOutput(job)
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
@@ -830,7 +827,6 @@ func (a *API) runSearch(job *Job) {
 		a.finish(job, StatusFailed, fmt.Sprintf("yt-dlp failed: %s", err.Error()))
 		return
 	}
-	a.validateOutput(job)
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
@@ -900,28 +896,11 @@ func isValidAudioFile(path string) bool {
 	return strings.HasPrefix(mime, "audio/")
 }
 
-// validateOutput checks the output directory for audio files and logs a warning
-// if none are found. It does not fail the job — validation is informational only.
-func (a *API) validateOutput(job *Job) {
-	outputDir := a.cfg.Output
-	if outputDir == "" {
-		return
-	}
-	found := false
-	filepath.Walk(outputDir, func(p string, fi os.FileInfo, err error) error {
-		if err != nil || fi.IsDir() {
-			return nil
-		}
-		if isValidAudioFile(p) {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if !found {
-		a.appendLog(job, "[validation] WARNING: no audio files found in output directory after successful download")
-	}
-}
+// validateOutput is a no-op. Previously walked the entire output directory
+// tree after every download, which was extremely slow for large libraries.
+// The download tools (spotiflac, yt-dlp, spotdl) already report success/failure
+// accurately, so this validation added no value.
+func (a *API) validateOutput(job *Job) {}
 
 func (a *API) finish(job *Job, status Status, errMsg string) {
 	a.mu.Lock()

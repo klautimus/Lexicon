@@ -40,5 +40,6 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
 }

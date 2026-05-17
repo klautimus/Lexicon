@@ -187,7 +187,7 @@ export default function PlaylistPage() {
           </p>
         </div>
       ) : (
-        <PlaylistTrackList tracks={playlist.tracks} onRemove={(i) => remove(i)} />
+        <PlaylistTrackList tracks={playlist.tracks} onRemove={(pos) => remove(pos)} />
       )}
     </div>
   );
@@ -210,7 +210,7 @@ function PlaylistTrackList({
             track={t}
             index={i}
             tracks={tracks}
-            onRemove={() => onRemove(i)}
+            onRemove={() => onRemove(t.position ?? i)}
           />
         ))}
       </div>
@@ -236,7 +236,7 @@ function PlaylistTrackList({
               track={t}
               index={i}
               tracks={tracks}
-              onRemove={() => onRemove(i)}
+              onRemove={() => onRemove(t.position ?? i)}
             />
           ))}
         </tbody>

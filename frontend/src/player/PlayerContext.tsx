@@ -74,7 +74,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // ----- Local <audio> setup -----
   useEffect(() => {
     const a = new Audio();
-    a.preload = "metadata";
+    a.preload = "auto";
     audioRef.current = a;
     a.volume = state.volume;
     const onTime = () =>

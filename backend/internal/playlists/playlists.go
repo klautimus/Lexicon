@@ -18,13 +18,18 @@ type Playlist struct {
 	CreatedAt     int64  `json:"created_at"`
 }
 
+type PlaylistTrack struct {
+	models.Track
+	Position int `json:"position"`
+}
+
 type PlaylistWithTracks struct {
-	ID            int64          `json:"id"`
-	Name          string         `json:"name"`
-	TrackCount    int            `json:"track_count"`
-	TotalDuration int            `json:"total_duration"`
-	CreatedAt     int64          `json:"created_at"`
-	Tracks        []models.Track `json:"tracks"`
+	ID            int64           `json:"id"`
+	Name          string          `json:"name"`
+	TrackCount    int             `json:"track_count"`
+	TotalDuration int             `json:"total_duration"`
+	CreatedAt     int64           `json:"created_at"`
+	Tracks        []PlaylistTrack `json:"tracks"`
 }
 
 type API struct{ db *sql.DB }
@@ -105,7 +110,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT `+models.TrackCols+`
+		SELECT `+models.TrackCols+`, i.position
 		FROM playlist_items i
 		JOIN tracks ON tracks.id = i.track_id
 		WHERE i.playlist_id = ?
@@ -116,8 +121,37 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		t, _ := models.ScanTrack(rows)
-		p.Tracks = append(p.Tracks, t)
+		var t models.Track
+		var title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
+		var spotifyID, externalURL sql.NullString
+		var trackNo, discNo, year, durationSec sql.NullInt64
+		var position int
+		err := rows.Scan(
+			&t.ID,
+			&title, &artist, &albumArtist, &album,
+			&trackNo, &discNo, &year, &genre,
+			&durationSec, &mediaKind, &mime,
+			&spotifyID, &externalURL,
+			&position,
+		)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		if title.Valid { t.Title = title.String }
+		if artist.Valid { t.Artist = artist.String }
+		if albumArtist.Valid { t.AlbumArtist = albumArtist.String }
+		if album.Valid { t.Album = album.String }
+		if trackNo.Valid { t.TrackNo = int(trackNo.Int64) }
+		if discNo.Valid { t.DiscNo = int(discNo.Int64) }
+		if year.Valid { t.Year = int(year.Int64) }
+		if genre.Valid { t.Genre = genre.String }
+		if durationSec.Valid { t.DurationSec = int(durationSec.Int64) }
+		if mediaKind.Valid { t.MediaKind = mediaKind.String }
+		if mime.Valid { t.Mime = mime.String }
+		if spotifyID.Valid { t.SpotifyID = spotifyID.String }
+		if externalURL.Valid { t.ExternalURL = externalURL.String }
+		p.Tracks = append(p.Tracks, PlaylistTrack{Track: t, Position: position})
 		p.TotalDuration += int(t.DurationSec)
 	}
 	if err := rows.Err(); err != nil {

@@ -145,6 +145,7 @@ export interface Track {
   mime: string;
   spotify_id?: string | null;
   external_url?: string | null;
+  position?: number;
 }
 
 export interface TrackListResponse {
