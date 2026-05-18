@@ -4,6 +4,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useCallback,
   ReactNode,
 } from "react";
 import { api, Track } from "../lib/api";
@@ -17,6 +18,7 @@ import {
   spotifyURIFromTrack,
   getSpotifyPlayer,
 } from "../lib/spotify";
+import { getPlayerWebSocket } from "../lib/playerws";
 
 type Source = "local" | "spotify" | null;
 type RepeatMode = "off" | "all" | "one";
@@ -69,7 +71,82 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const currentRef = useRef<Track | null>(null);
   const originalQueueRef = useRef<Track[]>([]);
   const shuffledRef = useRef<boolean>(false);
+  const consecutiveErrorsRef = useRef<number>(0);
+  const skipTimeoutRef = useRef<number | null>(null);
+  const playSessionRef = useRef<number>(0);
   const toast = useToast();
+  const wsRef = useRef<ReturnType<typeof getPlayerWebSocket> | null>(null);
+  const isWsPlayerRef = useRef<boolean>(false);
+
+  // ----- Helpers -----
+
+  const clearSkipTimeout = useCallback(() => {
+    if (skipTimeoutRef.current !== null) {
+      clearTimeout(skipTimeoutRef.current);
+      skipTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleSkip = useCallback(() => {
+    clearSkipTimeout();
+    skipTimeoutRef.current = window.setTimeout(() => {
+      skipTimeoutRef.current = null;
+      goNext();
+    }, 1500);
+  }, [clearSkipTimeout]);
+
+  // ----- WebSocket setup -----
+  useEffect(() => {
+    const ws = getPlayerWebSocket();
+    wsRef.current = ws;
+    isWsPlayerRef.current = ws.isPlayer();
+    ws.connect();
+
+    // If we're the player, listen for commands from controllers
+    ws.onState((msg: any) => {
+      if (!isWsPlayerRef.current) return;
+      if (msg.type === "play" && msg.track_id) {
+        // Find the track in the queue or fetch it
+        api.track(msg.track_id).then((t) => {
+          play([t], 0);
+        }).catch(() => {});
+      } else if (msg.type === "pause") {
+        const a = audioRef.current;
+        if (a) a.pause();
+      } else if (msg.type === "resume") {
+        const a = audioRef.current;
+        if (a) a.play().catch(() => {});
+      } else if (msg.type === "next") {
+        next();
+      } else if (msg.type === "prev") {
+        prev();
+      } else if (msg.type === "seek" && msg.position !== undefined) {
+        seek(msg.position);
+      } else if (msg.type === "transfer") {
+        // Another device is taking over — pause local playback
+        const a = audioRef.current;
+        if (a) a.pause();
+        isWsPlayerRef.current = false;
+      }
+    });
+
+    return () => {
+      ws.disconnect();
+    };
+  }, []);
+
+  // Broadcast state changes to controllers when we're the player
+  const broadcastState = useCallback(() => {
+    if (!isWsPlayerRef.current || !wsRef.current) return;
+    wsRef.current.send({
+      type: "state",
+      playing: state.playing,
+      track: state.current,
+      position: state.position,
+      duration: state.duration,
+      device: "host",
+    });
+  }, [state.playing, state.current, state.position, state.duration]);
 
   // ----- Local <audio> setup -----
   useEffect(() => {
@@ -98,11 +175,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         ? `Audio error (code ${err.code}): ${err.message || "unknown"}`
         : "Audio playback failed";
       console.error("[player]", msg);
-      toast.error("Playback failed — file may be corrupted or inaccessible");
       sourceRef.current = null;
       currentRef.current = null;
       playSecondsRef.current = 0;
       setState((s) => ({ ...s, source: null, error: msg, playing: false }));
+
+      // Auto-skip to next track (with consecutive error limit)
+      // Only handle if we're still in the same play session
+      consecutiveErrorsRef.current++;
+      if (consecutiveErrorsRef.current >= 5) {
+        toast.error("Multiple tracks failed to play — stopping playback");
+        consecutiveErrorsRef.current = 0;
+        return;
+      }
+      toast.error("Playback failed — skipping to next track");
+      scheduleSkip();
     };
     a.addEventListener("timeupdate", onTime);
     a.addEventListener("ended", onEnded);
@@ -135,6 +222,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       .catch(() => {});
     playSecondsRef.current = 0;
   }
+
+  // Broadcast state to controllers whenever it changes
+  useEffect(() => {
+    broadcastState();
+  }, [state.playing, state.position, state.current, broadcastState]);
 
   // ----- Track local listening time -----
   useEffect(() => {
@@ -187,6 +279,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function loadAndPlay(t: Track) {
+    // Clear any pending skip timeout from a previous track
+    clearSkipTimeout();
+    // Increment play session so stale error handlers are ignored
+    playSessionRef.current++;
+    // Reset consecutive errors for the new track
+    consecutiveErrorsRef.current = 0;
+
     flushLocalPlay(false);
     currentRef.current = t;
     setState((s) => ({ ...s, error: null }));
@@ -196,7 +295,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (isSpotify) {
       // Stop local audio
       const a = audioRef.current;
-      if (a) a.pause();
+      if (a) {
+        a.pause();
+        a.removeAttribute("src");
+        a.load();
+      }
 
       sourceRef.current = "spotify";
       setState((s) => ({ ...s, source: "spotify" }));
@@ -222,6 +325,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
     // Local file
     const a = audioRef.current!;
+    // Pause and reset before changing source to prevent ghost playback
+    a.pause();
     a.src = api.streamUrl(t.id);
     a.play()
       .then(() => {
@@ -229,14 +334,24 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         setState((s) => ({ ...s, source: "local", error: null }));
         playStartRef.current = Math.floor(Date.now() / 1000);
         playSecondsRef.current = 0;
+        consecutiveErrorsRef.current = 0;
       })
       .catch((e: any) => {
         const msg = e?.message || "Audio playback failed";
         console.error("[player] play failed:", msg);
-        toast.error("Failed to play track — file may be missing or corrupted");
         sourceRef.current = null;
         currentRef.current = null;
         setState((s) => ({ ...s, source: null, error: msg, playing: false }));
+
+        // Auto-skip — but only increment once per track (onError may also fire)
+        consecutiveErrorsRef.current++;
+        if (consecutiveErrorsRef.current >= 5) {
+          toast.error("Multiple tracks failed to play — stopping playback");
+          consecutiveErrorsRef.current = 0;
+          return;
+        }
+        toast.error("Failed to play track — skipping to next");
+        scheduleSkip();
       });
   }
 
@@ -251,6 +366,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   function play(tracks: Track[], startIndex = 0) {
     if (tracks.length === 0) return;
+    // Clear any pending auto-skip from previous track
+    clearSkipTimeout();
+    // Reset consecutive errors for manual play
+    consecutiveErrorsRef.current = 0;
     originalQueueRef.current = [...tracks];
     const chosen = tracks[startIndex];
     if (shuffledRef.current && tracks.length > 1) {
@@ -321,6 +440,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }
 
   function goNext() {
+    // Clear any pending skip timeout to prevent double-skipping
+    clearSkipTimeout();
     setState((s) => {
       // Repeat One: replay current track
       if (s.repeatMode === "one" && s.current) {

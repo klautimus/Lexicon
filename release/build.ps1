@@ -1,4 +1,4 @@
-# Lexicon Release Build Pipeline
+﻿# Lexicon Release Build Pipeline
 # Run this on the developer's Windows machine to produce LexiconSetup.exe
 #
 # Prerequisites:
@@ -140,15 +140,30 @@ if (-not (Test-Path $ngrokDest)) {
     Write-Host "Bundled ngrok.exe"
 }
 
-# Check for ffmpeg.exe (too large to auto-download reliably)
+# Bundle poddl.exe (podcast downloader)
+$poddlDest = Join-Path $releaseTools "poddl.exe"
+if (-not (Test-Path $poddlDest)) {
+    $poddlSrc = Join-Path $tools "poddl.exe"
+    if (Test-Path $poddlSrc) {
+        Copy-Item $poddlSrc $poddlDest
+        Write-Host "Bundled poddl.exe"
+    } else {
+        Write-Warning "poddl.exe not found in tools/. Download from https://github.com/freshe/poddl"
+    }
+} else {
+    Write-Host "Bundled poddl.exe"
+}
+
+# Check for ffmpeg.exe and ffprobe.exe (too large to auto-download reliably)
 $ffmpegDest = Join-Path $releaseTools "ffmpeg.exe"
+$ffprobeDest = Join-Path $releaseTools "ffprobe.exe"
 if (-not (Test-Path $ffmpegDest)) {
     $ffmpegSrc = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
     if ($ffmpegSrc) {
         Copy-Item $ffmpegSrc $ffmpegDest
         $ffprobeSrc = Join-Path (Split-Path $ffmpegSrc) "ffprobe.exe"
         if (Test-Path $ffprobeSrc) {
-            Copy-Item $ffprobeSrc (Join-Path $releaseTools "ffprobe.exe")
+            Copy-Item $ffprobeSrc $ffprobeDest
         }
         Write-Host "Bundled ffmpeg.exe"
     } else {
@@ -156,6 +171,33 @@ if (-not (Test-Path $ffmpegDest)) {
     }
 } else {
     Write-Host "Bundled ffmpeg.exe"
+}
+# Ensure ffprobe.exe is bundled alongside ffmpeg.exe
+if ((Test-Path $ffmpegDest) -and (-not (Test-Path $ffprobeDest))) {
+    $ffprobeSrc = Join-Path (Split-Path $ffmpegDest) "ffprobe.exe"
+    if (Test-Path $ffprobeSrc) {
+        Copy-Item $ffprobeSrc $ffprobeDest
+        Write-Host "Bundled ffprobe.exe"
+    } else {
+        Write-Warning "ffprobe.exe not found next to ffmpeg.exe. Download from https://www.gyan.dev/ffmpeg/builds/"
+    }
+}
+
+# 4b. Bundle icon files for installer
+Step "Bundling icon files..."
+$iconIco = Join-Path $release "lexicon.ico"
+$iconSvg = Join-Path $release "icon.svg"
+$icon192 = Join-Path $release "icon-192.png"
+$icon512 = Join-Path $release "icon-512.png"
+# Generate icons if not present
+if (-not (Test-Path $iconIco)) {
+    Write-Host "Generating icon files..."
+    python3 (Join-Path $release "gen_icon.py")
+}
+if (Test-Path $iconIco) {
+    Write-Host "Icon files ready: lexicon.ico, icon.svg, icon-192.png, icon-512.png"
+} else {
+    Write-Warning "Icon generation failed. Installer will use default icon."
 }
 
 # 5. Compile Inno Setup installer

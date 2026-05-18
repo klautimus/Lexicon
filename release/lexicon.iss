@@ -27,6 +27,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 SetupLogging=yes
+SetupIconFile=lexicon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -42,9 +43,11 @@ Source: "tools\spotdl.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifs
 Source: "tools\ffmpeg.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "tools\ffprobe.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "tools\ngrok.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "tools\poddl.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Dirs]
 Name: "{app}\data"; Permissions: everyone-modify
+Name: "{app}\podcasts"; Permissions: everyone-modify
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
@@ -284,8 +287,13 @@ begin
       envContent := envContent + 'YTDLP_BIN=' + ExpandConstant('{app}\tools\yt-dlp.exe') + #13#10;
     if FileExists(ExpandConstant('{app}\tools\ffmpeg.exe')) then
       envContent := envContent + 'FFMPEG_BIN=' + ExpandConstant('{app}\tools\ffmpeg.exe') + #13#10;
+    if FileExists(ExpandConstant('{app}\tools\ffprobe.exe')) then
+      envContent := envContent + 'FFPROBE_BIN=' + ExpandConstant('{app}\tools\ffprobe.exe') + #13#10;
     if FileExists(ExpandConstant('{app}\tools\ngrok.exe')) then
       envContent := envContent + 'NGROK_BIN=' + ExpandConstant('{app}\tools\ngrok.exe') + #13#10;
+    if FileExists(ExpandConstant('{app}\tools\poddl.exe')) then
+      envContent := envContent + 'PODDL_BIN=' + ExpandConstant('{app}\tools\poddl.exe') + #13#10;
+    envContent := envContent + 'PODCAST_DIR=' + ExpandConstant('{app}\podcasts') + #13#10;
 
     SaveStringToFile(envPath, envContent, False);
     FrontendPort := FrontendPortEdit.Text;

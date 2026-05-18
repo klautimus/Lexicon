@@ -113,10 +113,11 @@ type Job struct {
 	StartedAt  int64    `json:"started_at"`
 	FinishedAt int64    `json:"finished_at,omitempty"`
 	Error      string   `json:"error,omitempty"`
-	Tool       string   `json:"tool,omitempty"`        // "spotiflac", "spotdl", or "spotiflac→spotdl"
+	Tool       string   `json:"tool,omitempty"`        // "spotiflac", "spotdl", "ytdlp", "poddl", "http", etc.
 	UsedFallback bool   `json:"used_fallback,omitempty"`
 	IsSearch   bool     `json:"is_search,omitempty"`   // true when created via /download/search (no Spotify URL)
 	TrackID    int64    `json:"track_id,omitempty"`    // set when search resolves to existing library track
+	Kind       string   `json:"kind,omitempty"`        // "music" (default) or "podcast"; differentiates the source on the Downloads page
 	Log        []string `json:"log,omitempty"`
 
 	cmd *exec.Cmd `json:"-"`
@@ -134,6 +135,7 @@ type Config struct {
 	YtdlpBin            string // yt-dlp binary (final fallback — searches YouTube directly, no Spotify)
 	YtdlpFormat         string // mp3, m4a, etc.
 	FfmpegBin           string // ffmpeg path for yt-dlp audio extraction
+	FfprobeBin          string // ffprobe path for post-download validation (auto-detected from FfmpegBin if empty)
 	DeepSeekAPIKey      string
 	DeepSeekModel       string
 	DeepSeekThinking    string
@@ -184,7 +186,7 @@ func (a *API) recoverJobs() {
 	_, _ = a.db.Exec(`UPDATE download_jobs SET status='failed', error='server restarted' WHERE status IN ('running','queued')`)
 
 	// Load the most recent maxKeep jobs into memory
-	rows, err := a.db.Query(`SELECT id, url, output, status, started_at, finished_at, error, tool, used_fallback, is_search, track_id FROM download_jobs ORDER BY created_at DESC LIMIT ?`, a.maxKeep)
+	rows, err := a.db.Query(`SELECT id, url, output, status, started_at, finished_at, error, tool, used_fallback, is_search, track_id, IFNULL(kind, 'music') FROM download_jobs ORDER BY created_at DESC LIMIT ?`, a.maxKeep)
 	if err != nil {
 		log.Printf("[downloader] recoverJobs query: %v", err)
 		return
@@ -196,7 +198,7 @@ func (a *API) recoverJobs() {
 		var errStr, tool sql.NullString
 		var usedFallback, isSearch int
 		var trackID sql.NullInt64
-		if err := rows.Scan(&j.ID, &j.URL, &j.Output, &j.Status, &j.StartedAt, &finishedAt, &errStr, &tool, &usedFallback, &isSearch, &trackID); err != nil {
+		if err := rows.Scan(&j.ID, &j.URL, &j.Output, &j.Status, &j.StartedAt, &finishedAt, &errStr, &tool, &usedFallback, &isSearch, &trackID, &j.Kind); err != nil {
 			log.Printf("[downloader] recoverJobs scan: %v", err)
 			continue
 		}
@@ -299,6 +301,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 		Output:    a.cfg.Output,
 		Status:    StatusQueued,
 		StartedAt: time.Now().Unix(),
+		Kind:      "music",
 		Log:       []string{},
 	}
 	a.mu.Lock()
@@ -315,8 +318,8 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 	// Persist to database
 	if a.db != nil {
 		_, _ = a.db.Exec(
-			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search) VALUES(?, ?, ?, ?, ?, '', 0)`,
-			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt)
+			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search, kind) VALUES(?, ?, ?, ?, ?, '', 0, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind)
 		a.evictOldJobs()
 	}
 
@@ -417,6 +420,7 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 				FinishedAt: time.Now().Unix(),
 				IsSearch:   true,
 				TrackID:    trackID,
+				Kind:       "music",
 				Log:        []string{"[search] resolved to existing library track"},
 			}
 			a.mu.Lock()
@@ -433,8 +437,8 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 			// Persist to database
 			if a.db != nil {
 				_, _ = a.db.Exec(
-					`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id) VALUES(?, ?, ?, ?, ?, ?, 1, ?)`,
-					job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID)
+					`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id, kind) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+					job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID, job.Kind)
 			}
 
 			writeJSON(w, jobSummary(job))
@@ -450,6 +454,7 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 		StartedAt: time.Now().Unix(),
 		Log:       []string{},
 		IsSearch:  true,
+		Kind:      "music",
 	}
 	a.mu.Lock()
 	a.jobs[job.ID] = job
@@ -465,8 +470,8 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 	// Persist to database
 	if a.db != nil {
 		_, _ = a.db.Exec(
-			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search) VALUES(?, ?, ?, ?, ?, 1)`,
-			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt)
+			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind) VALUES(?, ?, ?, ?, ?, 1, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind)
 		a.evictOldJobs()
 	}
 
@@ -535,6 +540,87 @@ func (a *API) cancelJob(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db.Exec(`UPDATE download_jobs SET status='cancelled', finished_at=? WHERE id=?`, j.FinishedAt, id)
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ----- External job API -----
+// These three methods let other packages (e.g. podcaster) register their
+// downloads with the unified job system so they appear on the Downloads
+// page alongside SpotiFLAC/yt-dlp/spotDL music jobs. The external caller
+// is responsible for actually performing the download — this just gives
+// them a place to record progress, errors, and a streaming log.
+
+// RegisterExternalJob creates a new job in 'running' state and returns the
+// generated job ID. `kind` differentiates the source ("music" vs "podcast")
+// and `tool` identifies the specific downloader (e.g. "poddl", "http").
+// `url` is the human-readable label shown in the UI (episode title, search
+// query, or actual URL — whatever is most informative).
+func (a *API) RegisterExternalJob(kind, url, output, tool string) string {
+	if kind == "" {
+		kind = "music"
+	}
+	job := &Job{
+		ID:        uuid.NewString(),
+		URL:       url,
+		Output:    output,
+		Status:    StatusRunning,
+		StartedAt: time.Now().Unix(),
+		Tool:      tool,
+		Kind:      kind,
+		Log:       []string{},
+	}
+	a.mu.Lock()
+	a.jobs[job.ID] = job
+	a.order = append([]string{job.ID}, a.order...)
+	if len(a.order) > a.maxKeep {
+		for _, oldID := range a.order[a.maxKeep:] {
+			delete(a.jobs, oldID)
+		}
+		a.order = a.order[:a.maxKeep]
+	}
+	a.mu.Unlock()
+	if a.db != nil {
+		_, _ = a.db.Exec(
+			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, kind) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Tool, job.Kind)
+		a.evictOldJobs()
+	}
+	return job.ID
+}
+
+// AppendExternalLog appends a single line to the in-memory log of a job
+// previously created via RegisterExternalJob. Safe to call from any goroutine.
+// Silently no-ops if the job doesn't exist (e.g. evicted).
+func (a *API) AppendExternalLog(id, line string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	job, ok := a.jobs[id]
+	if !ok {
+		return
+	}
+	job.Log = append(job.Log, line)
+	if len(job.Log) > maxLogLines {
+		job.Log = job.Log[len(job.Log)-maxLogLines:]
+	}
+}
+
+// FinishExternalJob marks an external job as succeeded/failed/cancelled and
+// persists the final state to the database. `errMsg` should be empty on success.
+func (a *API) FinishExternalJob(id string, status Status, errMsg string) {
+	a.mu.Lock()
+	job, ok := a.jobs[id]
+	if !ok {
+		a.mu.Unlock()
+		return
+	}
+	job.Status = status
+	job.Error = errMsg
+	job.FinishedAt = time.Now().Unix()
+	a.mu.Unlock()
+	if a.db != nil {
+		_, _ = a.db.Exec(
+			`UPDATE download_jobs SET status=?, finished_at=?, error=?, tool=? WHERE id=?`,
+			string(status), job.FinishedAt, errMsg, job.Tool, id)
+	}
 }
 
 // evictOldJobs deletes old download_jobs rows from the database when
@@ -643,6 +729,12 @@ func (a *API) run(job *Job) {
 		"--embed-thumbnail",
 		"--newline",
 		"--no-warnings",
+		// Harden: make failures fatal and add retries
+		"--abort-on-error",
+		"--retries", "3",
+		"--fragment-retries", "10",
+		// Harden: use Android client for more reliable YouTube access
+		"--extractor-args", "youtube:player_client=android",
 		"-o", outputDir + "/%(artist)s - %(title)s.%(ext)s",
 	}
 	if a.cfg.FfmpegBin != "" {
@@ -661,6 +753,39 @@ func (a *API) run(job *Job) {
 	}
 
 	if fallbackErr == nil {
+		// Validate downloaded file
+		dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+		if dlFile != "" {
+			if verr := a.verifyDownloadedFile(dlFile); verr != nil {
+				a.appendLog(job, fmt.Sprintf("[verify] file invalid: %s", verr.Error()))
+				a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
+				retrySearch := "ytsearch2:" + strings.TrimPrefix(ytdlpSearch, "ytsearch1:")
+				retryOutputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
+				retryArgs := []string{
+					retrySearch, "--extract-audio", "--audio-format", "m4a",
+					"--audio-quality", "0", "--no-playlist", "--add-metadata",
+					"--embed-thumbnail", "--newline", "--no-warnings",
+					"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
+					"--extractor-args", "youtube:player_client=android",
+					"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
+				}
+				if a.cfg.FfmpegBin != "" {
+					retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
+				}
+				retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, "")
+				if retryErr != nil {
+					a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
+					return
+				}
+				retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+				if retryFile != "" {
+					if verr := a.verifyDownloadedFile(retryFile); verr != nil {
+						a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
+						return
+					}
+				}
+			}
+		}
 		a.finish(job, StatusSucceeded, "")
 		if a.rescan != nil {
 			go a.rescan()
@@ -742,6 +867,14 @@ func (a *API) run(job *Job) {
 		a.finish(job, StatusFailed, fmt.Sprintf("all tools failed. spotiflac: %s; yt-dlp: %s; spotdl: %s", primaryErr.Error(), fallbackErr.Error(), spotdlErr.Error()))
 		return
 	}
+	// Validate downloaded file
+	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+	if dlFile != "" {
+		if verr := a.verifyDownloadedFile(dlFile); verr != nil {
+			a.finish(job, StatusFailed, fmt.Sprintf("download invalid: %s", verr.Error()))
+			return
+		}
+	}
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
@@ -806,6 +939,12 @@ func (a *API) runSearch(job *Job) {
 		"--embed-thumbnail",
 		"--newline",
 		"--no-warnings",
+		// Harden: make failures fatal and add retries
+		"--abort-on-error",
+		"--retries", "3",
+		"--fragment-retries", "10",
+		// Harden: use Android client for more reliable YouTube access
+		"--extractor-args", "youtube:player_client=android",
 		"-o", outputDir + "/%(artist)s - %(title)s.%(ext)s",
 	}
 	if a.cfg.FfmpegBin != "" {
@@ -827,6 +966,41 @@ func (a *API) runSearch(job *Job) {
 		a.finish(job, StatusFailed, fmt.Sprintf("yt-dlp failed: %s", err.Error()))
 		return
 	}
+
+	// Validate downloaded file
+	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+	if dlFile != "" {
+		if verr := a.verifyDownloadedFile(dlFile); verr != nil {
+			a.appendLog(job, fmt.Sprintf("[verify] file invalid: %s", verr.Error()))
+			a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
+			retrySearch := "ytsearch2:" + strings.TrimPrefix(job.URL, "ytsearch1:")
+			retryOutputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
+			retryArgs := []string{
+				retrySearch, "--extract-audio", "--audio-format", "m4a",
+				"--audio-quality", "0", "--no-playlist", "--add-metadata",
+				"--embed-thumbnail", "--newline", "--no-warnings",
+				"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
+				"--extractor-args", "youtube:player_client=android",
+				"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
+			}
+			if a.cfg.FfmpegBin != "" {
+				retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
+			}
+			retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, "")
+			if retryErr != nil {
+				a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
+				return
+			}
+			retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+			if retryFile != "" {
+				if verr := a.verifyDownloadedFile(retryFile); verr != nil {
+					a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
+					return
+				}
+			}
+		}
+	}
+
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
@@ -896,11 +1070,72 @@ func isValidAudioFile(path string) bool {
 	return strings.HasPrefix(mime, "audio/")
 }
 
-// validateOutput is a no-op. Previously walked the entire output directory
-// tree after every download, which was extremely slow for large libraries.
-// The download tools (spotiflac, yt-dlp, spotdl) already report success/failure
-// accurately, so this validation added no value.
-func (a *API) validateOutput(job *Job) {}
+func (a *API) verifyDownloadedFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("file not found: %w", err)
+	}
+	if info.Size() < 10240 {
+		return fmt.Errorf("file too small (%d bytes)", info.Size())
+	}
+	if a.cfg.FfprobeBin != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, a.cfg.FfprobeBin,
+			"-v", "error",
+			"-show_entries", "format=duration",
+			"-show_entries", "stream=codec_type",
+			"-of", "default=noprint_wrappers=1",
+			path,
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ffprobe failed: %s", string(out))
+		}
+		output := string(out)
+		if !strings.Contains(output, "codec_type=audio") {
+			return fmt.Errorf("no audio stream found")
+		}
+	}
+	return nil
+}
+
+func (a *API) findDownloadedFile(before time.Time) string {
+	cutoff := before.Add(-5 * time.Minute)
+	var best string
+	bestTime := time.Time{}
+	filepath.Walk(a.cfg.Output, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".opus", ".webm":
+			if info.ModTime().After(cutoff) && info.ModTime().Before(before.Add(5*time.Minute)) {
+				if info.ModTime().After(bestTime) {
+					bestTime = info.ModTime()
+					best = path
+				}
+			}
+		}
+		return nil
+	})
+	return best
+}
+
+// validateOutput checks whether the downloaded file is a valid audio file.
+// It searches the output directory for recently created audio files and
+// validates them with ffprobe. Returns an error string if validation fails.
+func (a *API) validateOutput(job *Job) string {
+	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+	if dlFile == "" {
+		return "no audio file found in output directory"
+	}
+	if err := a.verifyDownloadedFile(dlFile); err != nil {
+		return err.Error()
+	}
+	return ""
+}
 
 func (a *API) finish(job *Job, status Status, errMsg string) {
 	a.mu.Lock()

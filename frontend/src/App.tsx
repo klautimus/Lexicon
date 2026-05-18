@@ -48,10 +48,8 @@ function DesktopLayout() {
     <div className="flex h-screen">
       <aside className="w-56 bg-panel border-r border-black/40 flex flex-col">
         <div className="px-5 py-4 border-b border-black/40">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-full border-2 border-accent flex items-center justify-center">
-              <div className="w-2 h-2 rounded-full bg-accent" />
-            </div>
+          <div className="flex items-center gap-2.5">
+            <img src="/icon.svg" alt="Lexicon" className="w-7 h-7 rounded" />
             <span className="text-lg font-semibold tracking-wide">Lexicon</span>
           </div>
         </div>

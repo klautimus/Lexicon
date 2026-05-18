@@ -127,9 +127,52 @@ CREATE TABLE IF NOT EXISTS download_jobs (
 	used_fallback INTEGER NOT NULL DEFAULT 0,
 	is_search INTEGER NOT NULL DEFAULT 0,
 	track_id INTEGER,
+	kind TEXT NOT NULL DEFAULT 'music',
 	created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status);
+-- idx_download_jobs_kind is created in Migrate() AFTER the additive ALTER TABLE
+-- because existing installations' download_jobs table doesn't have the kind
+-- column yet when this schema block runs (CREATE TABLE IF NOT EXISTS is a no-op
+-- when the table exists, so the column from line 130 never lands).
+
+CREATE TABLE IF NOT EXISTS podcast_feeds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL UNIQUE,
+    title TEXT,
+    description TEXT,
+    image_url TEXT,
+    author TEXT,
+    link TEXT,
+    language TEXT,
+    last_fetched_at INTEGER,
+    last_error TEXT,
+    auto_download INTEGER NOT NULL DEFAULT 0,
+    download_folder TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_podcast_feeds_url ON podcast_feeds(url);
+
+CREATE TABLE IF NOT EXISTS podcast_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feed_id INTEGER NOT NULL REFERENCES podcast_feeds(id) ON DELETE CASCADE,
+    guid TEXT NOT NULL,
+    title TEXT,
+    description TEXT,
+    pub_date INTEGER,
+    duration_sec INTEGER,
+    audio_url TEXT,
+    audio_type TEXT,
+    audio_size INTEGER,
+    downloaded INTEGER NOT NULL DEFAULT 0,
+    file_path TEXT,
+    file_size INTEGER,
+    download_error TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(feed_id, guid)
+);
+CREATE INDEX IF NOT EXISTS idx_podcast_episodes_feed ON podcast_episodes(feed_id);
+CREATE INDEX IF NOT EXISTS idx_podcast_episodes_downloaded ON podcast_episodes(downloaded);
 `
 
 // columnExists returns true if the given column already exists on the table.
@@ -180,6 +223,15 @@ func Migrate(db *sql.DB) error {
 		}
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_spotify ON tracks(spotify_id) WHERE spotify_id IS NOT NULL`); err != nil {
+		return err
+	}
+	// Add kind column to download_jobs (existing rows default to 'music')
+	if !columnExists(db, "download_jobs", "kind") {
+		if _, err := db.Exec(`ALTER TABLE download_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'music'`); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_download_jobs_kind ON download_jobs(kind)`); err != nil {
 		return err
 	}
 	return nil

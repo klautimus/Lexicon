@@ -1,7 +1,8 @@
 # history — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/history/history.go` (87 LOC)
+> **File:** `backend/internal/history/history.go` (91 LOC)
+> **Last updated:** 2026-05-17
 
 ## Purpose
 
@@ -35,7 +36,6 @@ Request body:
 
 - No deduplication — rapid seek events could generate duplicate rows
 - No minimum duration enforcement — backend accepts any duration_played_sec
-- Frontend `.catch(() => {})` swallows failures silently
 
 ## Working Here
 

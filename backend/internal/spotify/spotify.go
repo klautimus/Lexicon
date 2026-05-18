@@ -3,6 +3,7 @@
 package spotify
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -58,6 +59,8 @@ func (a *API) Mount(r chi.Router) {
 	r.Post("/api/spotify/disconnect", a.disconnect)
 	r.Post("/api/spotify/sync", a.manualSync)
 	r.Get("/api/spotify/token", a.sdkToken)
+	r.Get("/api/spotify/devices", a.devices)
+	r.Post("/api/spotify/transfer", a.transfer)
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
@@ -67,4 +70,53 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 
 func (a *API) configured() bool {
 	return a.cfg.ClientID != ""
+}
+
+func (a *API) devices(w http.ResponseWriter, r *http.Request) {
+	if !a.configured() {
+		http.Error(w, "spotify not configured", 400)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	token, err := a.ValidAccessToken(ctx)
+	if err != nil {
+		http.Error(w, "not connected: "+err.Error(), 400)
+		return
+	}
+	devs, err := GetDevices(ctx, token)
+	if err != nil {
+		http.Error(w, "failed to get devices: "+err.Error(), 500)
+		return
+	}
+	writeJSON(w, devs)
+}
+
+type transferReq struct {
+	DeviceID string `json:"device_id"`
+	Play     bool   `json:"play"`
+}
+
+func (a *API) transfer(w http.ResponseWriter, r *http.Request) {
+	if !a.configured() {
+		http.Error(w, "spotify not configured", 400)
+		return
+	}
+	var req transferReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", 400)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	token, err := a.ValidAccessToken(ctx)
+	if err != nil {
+		http.Error(w, "not connected: "+err.Error(), 400)
+		return
+	}
+	if err := TransferPlayback(ctx, token, req.DeviceID, req.Play); err != nil {
+		http.Error(w, "transfer failed: "+err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }

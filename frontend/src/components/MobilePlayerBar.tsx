@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { usePlayer } from "../player/PlayerContext";
 import { api } from "../lib/api";
+import DevicePicker from "./DevicePicker";
 
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return "0:00";
@@ -178,7 +179,7 @@ export default function MobilePlayerBar() {
           </div>
 
           {/* Volume */}
-          <div className="flex items-center gap-3 px-6 pb-6">
+          <div className="flex items-center gap-3 px-6 pb-4">
             <Volume2 size={16} className="text-muted flex-shrink-0" />
             <input
               type="range"
@@ -189,6 +190,11 @@ export default function MobilePlayerBar() {
               onChange={(e) => p.setVolume(Number(e.target.value))}
               className="flex-1 accent-accent"
             />
+          </div>
+
+          {/* Device Picker */}
+          <div className="flex items-center justify-center px-6 pb-6">
+            <DevicePicker currentTrack={t} />
           </div>
         </div>
       )}

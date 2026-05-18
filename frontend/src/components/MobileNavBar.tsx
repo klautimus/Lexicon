@@ -97,9 +97,12 @@ export default function MobileNavBar() {
           />
           <div className="fixed bottom-14 left-0 right-0 z-50 bg-panel border-t border-panel2 rounded-t-xl p-4" style={{ animation: "slideUp 0.2s ease-out" }}>
             <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-semibold text-muted uppercase tracking-wide">
-                More
-              </span>
+              <div className="flex items-center gap-2">
+                <img src="/icon.svg" alt="Lexicon" className="w-5 h-5 rounded" />
+                <span className="text-sm font-semibold text-muted uppercase tracking-wide">
+                  More
+                </span>
+              </div>
               <button
                 onClick={() => setSheetOpen(false)}
                 className="p-1 text-muted hover:text-text"

@@ -1,7 +1,8 @@
 # analytics — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/analytics/analytics.go` (123 LOC)
+> **File:** `backend/internal/analytics/analytics.go` (160 LOC)
+> **Last updated:** 2026-05-17
 
 ## Purpose
 
@@ -19,21 +20,18 @@ Pure SQL aggregations over the `plays` table — no extra services needed. Provi
 
 ## Heatmap Query
 
+Uses `TIMEZONE` env var (default "local" → "localtime"):
 ```sql
-SELECT CAST(strftime('%w', started_at, 'unixepoch','localtime') AS INTEGER) AS dow,
-       CAST(strftime('%H', started_at, 'unixepoch','localtime') AS INTEGER) AS hour,
+SELECT CAST(strftime('%w', started_at, 'unixepoch', '<tz>') AS INTEGER) AS dow,
+       CAST(strftime('%H', started_at, 'unixepoch', '<tz>') AS INTEGER) AS hour,
        COUNT(*) FROM plays GROUP BY dow, hour
 ```
 
-Uses `localtime` to convert Unix timestamps to server-local time.
-
 ## Known Issues
 
-- **Heatmap timezone-dependent** — relies on server `TZ` env var, not configurable from `.env`
-- **Top genres often empty** — Spotify sync doesn't populate genre, and local files may not have genre tags
-- **No row error checking** — `rows.Scan()` errors are silently ignored (`_ = a.db.Query`)
-- No date range filtering — always returns all-time stats
-- No caching — every request hits the DB
+- **Top genres may be empty** — depends on local files having genre tags and Spotify sync populating genres
+- **No date range filtering** — always returns all-time stats
+- **No caching** — every request hits the DB
 
 ## Working Here
 

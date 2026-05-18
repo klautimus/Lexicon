@@ -1,7 +1,8 @@
 # config — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/config/config.go` (58 LOC)
+| **File:** `backend/internal/config/config.go` (84 LOC)
+> **Last updated:** 2026-05-17
 
 ## Purpose
 
@@ -14,23 +15,26 @@ type Config struct {
     Port               string  // default "8787"
     DBPath             string  // default "./data/lexicon.db"
     MediaRoots         string  // semicolon-separated on Windows
+    Timezone           string  // default "local" (for analytics heatmap)
     DeepSeekAPIKey     string
     DeepSeekModel      string  // default "deepseek-v4-flash"
     DeepSeekThinking   string  // default "medium"
-    DeepSeekBaseURL    string
-    SpotifyClientID    string
-    SpotifyClientSecret string  // NEW v2
-    SpotifyRedirectURI string
-    SpotifyFrontendURL string
-    SpotiflacBin       string  // NEW v2
-    SpotiflacOutput    string  // NEW v2
-    SpotiflacFolderFmt string  // NEW v2
-    SpotdlBin          string  // NEW v2
-    SpotdlFormat       string  // NEW v2 (default "mp3")
-    SpotdlAudio        string  // NEW v2
-    YtdlpBin           string  // NEW v2
-    YtdlpFormat        string  // NEW v2 (default "mp3")
-    FfmpegBin          string  // NEW v2
+    DeepSeekBaseURL    string  // default "https://api.deepseek.com"
+    SpotifyClientID     string
+    SpotifyClientSecret string  // for spotDL fallback rate limit
+    SpotifyRedirectURI  string
+    SpotifyFrontendURL  string
+    SpotiflacBin       string
+    SpotiflacOutput    string
+    SpotiflacFolderFmt string
+    SpotdlBin          string
+    SpotdlFormat       string  // default "mp3"
+    SpotdlAudio        string  // default "piped,youtube,soundcloud,bandcamp"
+    YtdlpBin           string
+    YtdlpFormat        string  // default "mp3"
+    FfmpegBin          string
+    DownloadConcurrency int    // default 2
+    WebSearchEnabled   bool   // default true
 }
 ```
 
@@ -41,12 +45,6 @@ func Load() Config
 ```
 
 Reads `os.Getenv()` for each field, falling back to defaults. Uses helper `env(key, def string) string`.
-
-## Known Issues
-
-- No validation of required fields at load time — missing `DEEPSEEK_API_KEY` causes runtime 400 errors.
-- `MediaRoots` split by `;` — Windows-specific, not portable to Unix.
-- No config file reload — server restart required for any env var changes.
 
 ## Working Here
 

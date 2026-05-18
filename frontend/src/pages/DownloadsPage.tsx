@@ -274,6 +274,14 @@ function JobRow({
             <span>{job.status}</span>
             <span>·</span>
             <span>{new Date(job.started_at * 1000).toLocaleTimeString()}</span>
+            {job.kind && job.kind !== "music" && (
+              <>
+                <span>·</span>
+                <span className="px-1.5 rounded bg-purple-400/20 text-purple-300">
+                  {job.kind}
+                </span>
+              </>
+            )}
             {job.tool && (
               <>
                 <span>·</span>

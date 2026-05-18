@@ -26,7 +26,9 @@ import (
 	"github.com/kevin/lexicon/internal/downloader"
 	"github.com/kevin/lexicon/internal/history"
 	"github.com/kevin/lexicon/internal/library"
+	"github.com/kevin/lexicon/internal/playerws"
 	"github.com/kevin/lexicon/internal/playlists"
+	"github.com/kevin/lexicon/internal/podcaster"
 	"github.com/kevin/lexicon/internal/recommender"
 	"github.com/kevin/lexicon/internal/scanner"
 	"github.com/kevin/lexicon/internal/spotify"
@@ -77,9 +79,34 @@ func main() {
 		BaseURL:  cfg.DeepSeekBaseURL,
 	}, ws, spotifyAPI)
 
+	// Compute podcast output directory (needed by doRescan and podcastAPI)
+	podcastOutput := cfg.PodcastDir
+	if podcastOutput == "" {
+		for _, r := range strings.Split(cfg.MediaRoots, ";") {
+			if r = strings.TrimSpace(r); r != "" {
+				podcastOutput = r
+				break
+			}
+		}
+	}
+
 	// Helper closure used by both the rescan endpoint and the downloader
 	doRescan := func() {
 		roots := strings.Split(cfg.MediaRoots, ";")
+		// Always include the podcast output directory so downloaded episodes
+		// get indexed into the tracks table and become searchable/playable.
+		if podcastOutput != "" {
+			found := false
+			for _, r := range roots {
+				if strings.TrimSpace(r) == podcastOutput {
+					found = true
+					break
+				}
+			}
+			if !found {
+				roots = append(roots, podcastOutput)
+			}
+		}
 		for _, root := range roots {
 			root = strings.TrimSpace(root)
 			if root == "" {
@@ -120,9 +147,33 @@ func main() {
 		DownloadConcurrency: cfg.DownloadConcurrency,
 	}, database, doRescan)
 
+	// Podcast manager
+	podcastAPI := podcaster.New(database, podcaster.Config{
+		PoddlBin:     cfg.PoddlBin,
+		OutputDir:    podcastOutput,
+		AutoDownload: true,
+	}, doRescan, dlAPI)
+
+	// WebSocket hub for multi-device playback control
+	wsHub := playerws.New()
+	go wsHub.Run()
+
 	// Initial scan in background
 	go func() {
 		roots := strings.Split(cfg.MediaRoots, ";")
+		// Include podcast output directory in initial scan
+		if podcastOutput != "" {
+			found := false
+			for _, r := range roots {
+				if strings.TrimSpace(r) == podcastOutput {
+					found = true
+					break
+				}
+			}
+			if !found {
+				roots = append(roots, podcastOutput)
+			}
+		}
 		for _, r := range roots {
 			r = strings.TrimSpace(r)
 			if r == "" {
@@ -222,6 +273,7 @@ func main() {
 	rec.Mount(r)
 	spotifyAPI.Mount(r)
 	dlAPI.Mount(r)
+	podcastAPI.Mount(r)
 
 	// Start Spotify background syncer (no-op if SPOTIFY_CLIENT_ID empty or not connected)
 	spotifyAPI.Syncer().Start(context.Background())
@@ -231,6 +283,9 @@ func main() {
 		go doRescan()
 		w.Write([]byte(`{"started":true}`))
 	})
+
+	// WebSocket endpoint for multi-device playback control
+	r.Get("/api/ws/player", wsHub.ServeHTTP)
 
 	// Serve embedded frontend static files (SPA catch-all)
 	fileServer := http.FileServer(http.FS(distFS))

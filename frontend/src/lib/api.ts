@@ -67,8 +67,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message }),
     }),
-  generatePlaylist: (force?: boolean) =>
-    j<PlaylistPayload>(`/recommendations/playlist${force ? '?force=true' : ''}`, { method: "POST" }),
+  generatePlaylist: (force?: boolean, count?: number) => {
+    let url = '/recommendations/playlist';
+    const params = new URLSearchParams();
+    if (force) params.set('force', 'true');
+    if (count) params.set('count', count.toString());
+    if (params.toString()) url += '?' + params.toString();
+    return j<PlaylistPayload>(url, { method: 'POST' });
+  },
   spotifyStatus: () => j<SpotifyStatus>("/spotify/status"),
   spotifyAuthURL: () => "/api/spotify/auth-url",
   spotifyDisconnect: () =>
@@ -105,6 +111,29 @@ export const api = {
     j<{ ok: boolean }>(`/playlists/${playlistId}/tracks/${position}`, { method: 'DELETE' }),
   deleteTrack: (trackId: number) =>
     j<void>(`/library/track/${trackId}`, { method: 'DELETE' }),
+
+  // Podcast feeds
+  podcastFeeds: () => j<PodcastFeed[]>('/podcasts/feeds'),
+  podcastSubscribe: (url: string) =>
+    j<PodcastFeed>('/podcasts/subscribe', { method: 'POST', body: JSON.stringify({ url }) }),
+  podcastUnsubscribe: (id: number) =>
+    j<{ ok: boolean }>(`/podcasts/feeds/${id}`, { method: 'DELETE' }),
+  podcastEpisodes: (feedId: number) =>
+    j<PodcastEpisode[]>(`/podcasts/feeds/${feedId}/episodes`),
+  podcastSync: (feedId: number) =>
+    j<{ ok: boolean }>(`/podcasts/feeds/${feedId}/sync`, { method: 'POST' }),
+  podcastDownloadEpisode: (episodeId: number) =>
+    j<{ ok: boolean }>(`/podcasts/episodes/${episodeId}/download`, { method: 'POST' }),
+  podcastDownloadFeed: (feedId: number) =>
+    j<{ ok: boolean }>(`/podcasts/feeds/${feedId}/download`, { method: 'POST' }),
+  podcastEpisodeTrack: (episodeId: number) =>
+    j<{ track_id: number }>(`/podcasts/episodes/${episodeId}/track`),
+  podcastStatus: () => j<{ available: boolean; bin?: string }>('/podcasts/status'),
+
+  // Spotify devices
+  spotifyDevices: () => j<SpotifyDevice[]>('/spotify/devices'),
+  spotifyTransfer: (deviceId: string, play: boolean) =>
+    j<{ ok: boolean }>('/spotify/transfer', { method: 'POST', body: JSON.stringify({ device_id: deviceId, play }) }),
 };
 
 export interface DownloadStatus {
@@ -127,6 +156,7 @@ export interface DownloadJob {
   tool?: string;
   used_fallback?: boolean;
   track_id?: number;
+  kind?: string; // "music" (default) or "podcast"
   log?: string[];
 }
 
@@ -262,4 +292,40 @@ export interface Playlist {
 
 export interface PlaylistWithTracks extends Playlist {
   tracks: Track[];
+}
+
+export interface PodcastFeed {
+  id: number;
+  url: string;
+  title: string;
+  description: string;
+  image_url: string;
+  author: string;
+  episode_count: number;
+  downloaded_count: number;
+  last_fetched_at: number;
+  auto_download: boolean;
+}
+
+export interface PodcastEpisode {
+  id: number;
+  feed_id: number;
+  guid: string;
+  title: string;
+  description: string;
+  pub_date: number;
+  duration_sec: number;
+  audio_url: string;
+  downloaded: boolean;
+  file_path: string;
+  download_error: string;
+}
+
+export interface SpotifyDevice {
+  id: string;
+  name: string;
+  type: string;
+  is_active: boolean;
+  is_restricted: boolean;
+  volume_percent: number;
 }

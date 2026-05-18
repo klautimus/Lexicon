@@ -1,7 +1,8 @@
 # db — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/db/db.go` (160 LOC)
+> **File:** `backend/internal/db/db.go` (186 LOC)
+> **Last updated:** 2026-05-17
 
 ## Purpose
 
@@ -15,7 +16,7 @@ func Open(path string) (*sql.DB, error)
 
 Uses `modernc.org/sqlite` (pure Go SQLite driver). Enables WAL journal mode, 5s busy timeout, foreign keys. Creates parent directory if needed.
 
-## Schema (7 tables)
+## Schema (8 tables)
 
 | Table | Purpose |
 |-------|---------|
@@ -24,9 +25,10 @@ Uses `modernc.org/sqlite` (pure Go SQLite driver). Enables WAL journal mode, 5s 
 | `plays` | Listening history (track_id, started_at, duration, completed, source) |
 | `playlists` | Playlist names and creation timestamps |
 | `playlist_items` | Playlist ↔ Track junction (position-based ordering) |
-| `recommendations` | Cached DeepSeek recommendations (JSON payload) |
+| `recommendations` | Cached DeepSeek recommendations (JSON payload, type, prompt_hash) |
 | `spotify_tokens` | Spotify OAuth tokens (singleton row, id=1) |
-| `spotify_pkce` | PKCE state → code_verifier mapping (temporary) |
+| `spotify_pkce` | PKCE state → code_verifier mapping (temporary, legacy — verifiers now in-memory) |
+| `download_jobs` | Download job metadata (id, url, status, tool, timestamps) |
 
 ## FTS Triggers
 
@@ -45,22 +47,16 @@ func Migrate(db *sql.DB) error
 2. Checks for missing columns via `columnExists()` and adds them with `ALTER TABLE`
 3. Creates missing indexes
 
-This is **additive only** — no destructive migrations, no version tracking.
+This is **addive only** — no destructive migrations, no version tracking.
 
 ### Added columns (post-v1):
+- `recommendations.type` — differentiates general vs playlist cache
 - `tracks.spotify_id` — links to Spotify catalog
 - `tracks.external_url` — external source URL
-
-## Known Issues
-
-- No migration versioning — can't detect if a migration was applied and later needs rollback.
-- `columnExists()` uses `PRAGMA table_info` — works but not efficient.
-- No connection pooling — single `*sql.DB` shared across all goroutines.
-- No WAL checkpoint management — WAL file can grow unbounded.
+- Unique partial index on `tracks.spotify_id` (WHERE NOT NULL)
 
 ## Working Here
 
 - Adding a new table: add `CREATE TABLE IF NOT EXISTS` to `schema` constant.
 - Adding a column: add `ALTER TABLE` guarded by `columnExists()` in `Migrate()`.
 - Adding an index: add `CREATE INDEX IF NOT EXISTS` in `Migrate()`.
-- Changing the driver: update the `sql.Open()` DSN string.

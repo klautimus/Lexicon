@@ -3,6 +3,7 @@
 > **Zero-context onboarding for the React frontend.**
 > **Parent:** [Lexicon root](../development_context.md)
 > **Stack:** React 18, TypeScript, Vite 5, TailwindCSS 3, React Router, Recharts, Lucide Icons
+> **Last updated:** 2026-05-17
 
 ## Purpose
 
@@ -20,36 +21,40 @@ frontend/
 ├── index.html            # HTML entry point
 ├── node_modules/         # Dependencies
 ├── dist/                 # Production build (output)
-├── public/               # Static assets
+├── public/               # Static assets (icon.svg, manifest.json)
 └── src/
     ├── main.tsx           # React entry point
     ├── App.tsx            # Shell: providers, routing, nav, player bar
     ├── index.css          # Tailwind + custom styles
     ├── lib/
     │   ├── api.ts         # Typed API client (all backend endpoints)
-    │   └── spotify.ts     # Spotify Web Playback SDK wrapper
+    │   ├── spotify.ts     # Spotify Web Playback SDK wrapper
+    │   └── playerws.ts    # WebSocket player client
     ├── player/
     │   └── PlayerContext.tsx  # Global audio player state + history recording
     ├── contexts/
-    │   └── ToastContext.tsx   # Toast notification system (NEW v2)
-    ├── components/
-    │   ├── PlayerBar.tsx      # Persistent playback bar (desktop)
-    │   ├── TrackList.tsx      # Track table with add-to-playlist (NEW v2)
-    │   ├── MobilePlayerBar.tsx # Compact player bar (mobile)
-    │   └── MobileNavBar.tsx    # Bottom nav bar (mobile)
+    │   ├── ToastContext.tsx   # Toast notification system
+    │   └── DownloadContext.tsx # Cross-route download state
     ├── hooks/
     │   └── useIsMobile.ts     # Detect mobile viewport
+    ├── components/
+    │   ├── PlayerBar.tsx      # Persistent playback bar (desktop)
+    │   ├── TrackList.tsx      # Track table with add-to-playlist
+    │   ├── MobilePlayerBar.tsx # Compact player bar (mobile)
+    │   ├── MobileNavBar.tsx    # Bottom nav bar (mobile)
+    │   ├── DevicePicker.tsx    # Spotify Connect + WebSocket device selector
+    │   └── ErrorBoundary.tsx   # Error boundary wrapper
     └── pages/
-        ├── HomePage.tsx       # Dashboard
-        ├── MusicPage.tsx      # Music library + download integration (NEW v2)
-        ├── PodcastsPage.tsx   # Podcast library
+        ├── HomePage.tsx       # Dashboard + QR code for LAN
+        ├── MusicPage.tsx      # Music library + download integration
+        ├── PodcastsPage.tsx   # Podcast library (two-panel layout)
         ├── AnalyticsPage.tsx  # Charts (Recharts)
-        ├── RecsPage.tsx       # Discover + AI playlist + download-on-demand (NEW v2)
-        ├── SearchPage.tsx     # Search + download integration (NEW v2)
+        ├── RecsPage.tsx       # Discover + AI playlist + download-on-demand
+        ├── SearchPage.tsx     # Search + download integration
         ├── SettingsPage.tsx   # Spotify connection settings
-        ├── DownloadsPage.tsx  # Download job manager (NEW v2)
-        ├── PlaylistsPage.tsx  # Playlist grid (NEW v2)
-        └── PlaylistPage.tsx   # Playlist detail with tracks (NEW v2)
+        ├── DownloadsPage.tsx  # Download job manager
+        ├── PlaylistsPage.tsx  # Playlist grid
+        └── PlaylistPage.tsx   # Playlist detail with tracks
 ```
 
 ## Dev Setup
@@ -80,22 +85,23 @@ export default defineConfig({
 ## Provider Hierarchy
 
 ```
-App
-  └── PlayerProvider (PlayerContext — audio player + history)
-      └── ToastProvider (ToastContext — notifications)
-          └── DesktopLayout | MobileLayout
-              ├── Sidebar/Nav
-              ├── <Routes> (page content)
-              └── PlayerBar / MobilePlayerBar
+ErrorBoundary
+  └── ToastProvider (ToastContext — notifications)
+      └── PlayerProvider (PlayerContext — audio player + history)
+          └── DownloadProvider (DownloadContext — cross-route download state)
+              └── DesktopLayout | MobileLayout
+                  ├── Sidebar/Nav
+                  ├── <Routes> (page content)
+                  └── PlayerBar / MobilePlayerBar
 ```
 
 ## Key Routes
 
 | Path | Page | v2 Change |
 |------|------|:---:|
-| `/` | HomePage | No |
+| `/` | HomePage | ✅ QR code for LAN |
 | `/music` | MusicPage | ✅ filters + download |
-| `/podcasts` | PodcastsPage | No |
+| `/podcasts` | PodcastsPage | ✅✅ Two-panel layout with feed sidebar + episode list |
 | `/playlists` | PlaylistsPage | 🆕 |
 | `/playlists/:id` | PlaylistPage | 🆕 |
 | `/downloads` | DownloadsPage | 🆕 |
@@ -103,15 +109,6 @@ App
 | `/discover` | RecsPage | ✅ expanded |
 | `/search` | SearchPage | ✅ download integration |
 | `/settings` | SettingsPage | No |
-
-## Known Frontend Issues
-
-1. **Listen time always 0** — `flushLocalPlay()` calls `api.recordPlay()` but swallows errors with `.catch(() => {})`. If the API call fails, no retry or user feedback.
-2. **Silent error swallowing** — Multiple `.catch(() => {})` in PlayerContext (audio.play(), recordPlay, Spotify calls)
-3. **Album name truncation** — TrackList uses CSS `truncate` without max-width on album column
-4. **RecsPage state bleed** — `completedIds`/`downloadingIds`/`playlistTrackStatus` state lost on navigation
-5. **No pagination on Music page** — hardcoded 500 limit (client-side filtering helps)
-6. **Toast notifications** — only used in RecsPage, MusicPage, SearchPage (not universal)
 
 ## Working on the Frontend
 

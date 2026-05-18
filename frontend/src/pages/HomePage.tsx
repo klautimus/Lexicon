@@ -121,8 +121,13 @@ export default function HomePage() {
       )}
 
       <div>
-        <h1 className="text-3xl font-semibold tracking-tight mb-1">Welcome back</h1>
-        <p className="text-muted">Your private library, intelligently organized.</p>
+        <div className="flex items-center gap-3 mb-2">
+          <img src="/icon.svg" alt="Lexicon" className="w-10 h-10 rounded-lg" />
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight mb-0">Welcome back</h1>
+            <p className="text-muted">Your private library, intelligently organized.</p>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

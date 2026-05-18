@@ -1,7 +1,7 @@
 # scanner — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/scanner/scanner.go` (101 LOC)
+| **File:** `backend/internal/scanner/scanner.go` (108 LOC)
 
 ## Purpose
 
@@ -60,6 +60,12 @@ if strings.Contains(strings.ToLower(genre), "podcast") ||
 - `tag.ReadFrom` opens the file a second time (after `os.Stat`)
 - No handling of symlinks or reparse points on Windows
 - `mtime` comparison is in seconds — file updated within the same second may be missed
+
+## Phase 4: File Size Validation (v2.7)
+
+- `indexFile()` now skips files < 10KB (logged as suspicious)
+- Prevents corrupt/incomplete downloads from being indexed
+- Catches files that were downloaded before the downloader validation was added
 
 ## Working Here
 

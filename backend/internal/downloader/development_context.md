@@ -1,150 +1,102 @@
-# downloader — Development Context
+# Downloader Package — Development Context
 
-> **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/downloader/downloader.go` (765 LOC) — 🆕 NEW in v2 (largest module)
+## Overview
 
-## Purpose
+The `downloader` package integrates multiple download tools (SpotiFLAC, yt-dlp, spotDL) to fetch audio files from Spotify URLs and free-text search queries. It manages job lifecycle, concurrency, logging, and database persistence.
 
-Downloads audio from Spotify URLs or free-text search queries using a 3-tier fallback pipeline:
-**SpotiFLAC → yt-dlp → spotDL**
+## Architecture
 
-Manages an in-memory job queue with log streaming, cancellation, and automatic library rescan on completion.
+- **`API`** — Main struct holding config, DB connection, job map, and semaphore for concurrency control.
+- **`Job`** — Represents a download task with status, log, timing, and tool tracking.
+- **`Config`** — Holds binary paths, output directory, format settings, and API keys.
 
-## Configuration
+### Download Flow
 
-```go
-type Config struct {
-    Bin, Output, FolderFormat      string  // SpotiFLAC
-    SpotdlBin, SpotdlFormat, SpotdlAudio string  // spotDL fallback
-    YtdlpBin, YtdlpFormat          string  // yt-dlp fallback
-    FfmpegBin                      string  // ffmpeg for audio extraction
-    SpotifyClientID, SpotifyClientSecret string // for spotDL rate limit
-    DeepSeekAPIKey, DeepSeekModel, DeepSeekThinking, DeepSeekBaseURL string
-}
-```
+1. **Spotify URL** → `run()` → SpotiFLAC (primary) → yt-dlp (fallback) → spotDL (last resort)
+2. **Search query** → `runSearch()` → yt-dlp (with optional DeepSeek query parsing)
 
-## Routes
+### Concurrency
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/download/status` | Configuration status (what's configured) |
-| `POST` | `/api/download` | Enqueue Spotify URL download |
-| `POST` | `/api/download/search` | Enqueue free-text search download |
-| `GET` | `/api/download/jobs` | List all jobs (without logs) |
-| `GET` | `/api/download/jobs/{id}` | Get single job with full log |
-| `POST` | `/api/download/jobs/{id}/cancel` | Kill running process |
+A semaphore (`a.sema`) limits concurrent downloads. Jobs are tracked in-memory and persisted to SQLite.
 
-## Job Model
+## Phase 1: Post-Download File Validation & Auto-Retry
 
-```go
-type Job struct {
-    ID           string   // UUID
-    URL          string   // Spotify URL or search query
-    Output       string   // output directory
-    Status       Status   // queued → running → succeeded/failed/cancelled
-    StartedAt    int64    // Unix timestamp
-    FinishedAt   int64    // set on completion
-    Error        string   // error message if failed
-    Tool         string   // "spotiflac", "spotiflac→ytdlp", "spotiflac→ytdlp→spotdl"
-    UsedFallback bool     // true if primary tool failed
-    IsSearch     bool     // true for text search (not Spotify URL)
-    TrackID      int64    // set when search resolves to existing library track
-    Log          []string // max 500 lines per job
-    cmd          *exec.Cmd // hidden from JSON
-}
-```
+### Problem
 
-Jobs stored in-memory (`map[string]*Job`), max 50. Oldest evicted on overflow. **Lost on server restart.**
+~12% of files downloaded by yt-dlp won't play because yt-dlp's ffmpeg post-processor fails silently, leaving files with wrong content/extension. The `isValidAudioFile()` function existed but was never called. `validateOutput()` was a no-op.
 
-## Download Pipeline — `run()` method (line 451)
+### Changes Made
 
-### Tier 1: SpotiFLAC (primary)
-```bash
-spotiflac -o <output> [-folder-format <fmt>] <spotify_url>
-```
-- **Critical:** SpotiFLAC always exits with code 0, even on failure!
-- Success/failure detected by parsing the summary line: `Summary: X Success, Y Failed`
-- Regex: `Summary:\s*(\d+)\s*Success,\s*(\d+)\s*Failed`
-- If `Success == 0 && Failed > 0` → soft failure → advance to Tier 2
+#### New Functions
 
-### Tier 2: yt-dlp (fallback)
-```bash
-yt-dlp "ytsearch1:<query>" --extract-audio --audio-format mp3 --audio-quality 0 --no-playlist --add-metadata --embed-thumbnail -o "<output>/%(artist)s - %(title)s.%(ext)s"
-```
-- Query parsed from SpotiFLAC log: "Found Track:" or "Failed:" lines
-- Falls back to raw Spotify URL if parsing fails
-- If successful → rescan → done
+- **`verifyDownloadedFile(path string) error`** — Validates a downloaded file by:
+  - Checking file exists and is ≥ 10KB
+  - Running ffprobe to verify an audio stream is present (if `FfprobeBin` is configured)
 
-### Tier 3: spotDL (final fallback)
-```bash
-spotdl download <targets> --output <template> --format mp3 --threads 2 --client-id ... --client-secret ... --audio piped,youtube,soundcloud,bandcamp
-```
-- Uses track queries parsed from SpotiFLAC if available
-- Otherwise passes original Spotify URL
-- SpotDL downloads from YouTube Music (no Spotify Premium needed)
-- Spotify client credentials used to avoid shared rate limits
+- **`findDownloadedFile(before time.Time) string`** — Searches the output directory for recently created audio files (modified within a 5-minute window around the job start time). Returns the most recently modified matching file.
 
-## Search Mode — `runSearch()` (line 636)
+#### Modified Functions
 
-Used when user submits free-text query (not a Spotify URL):
-1. Optionally parses query via DeepSeek into structured metadata
-2. Searches YouTube: `ytsearch1:<query>` with `--match-filter "duration < 600"`
-3. DeepSeek prompt optimizes for YouTube audio search (appends "audio" or "- Topic")
+- **`validateOutput(job *Job) string`** — Replaced no-op with actual validation logic. Calls `findDownloadedFile` + `verifyDownloadedFile`. Returns an error string (empty string = valid).
 
-## DeepSeek Query Parsing (line 765)
+- **`runSearch()`** — After yt-dlp succeeds, validates the downloaded file. If invalid:
+  1. Logs the validation failure
+  2. Retries with `ytsearch2:` (second YouTube result) and `m4a` format (avoids ffmpeg conversion)
+  3. Validates the retry file
+  4. Fails the job if retry also produces an invalid file
 
-Parses user's free-text query into:
-```json
-{"type": "music|podcast", "artist": "...", "title": "...", "album": "...", "search_query": "optimized query"}
-```
-- Temperature 0.3 for deterministic output
-- 30s timeout
-- Gracefully degrades: if parsing fails, uses raw query
+- **`run()` (Tier 2 yt-dlp fallback)** — Same validation + retry pattern integrated into the `fallbackErr == nil` block.
 
-## Library Dedup — `findLibraryTrack()` (line 263)
+### Retry Strategy
 
-Three strategies to avoid re-downloading existing tracks:
-1. **Exact match:** title + artist (LOWER comparison)
-2. **Prefix match:** title startsWith on "Artist - Title" format
-3. **FTS5 match:** cleaned query tokenized and searched
-4. **LIKE fallback:** wildcard match on title or artist
+- Uses `ytsearch2:` to get the second YouTube result (different from the first attempt)
+- Uses `m4a` format to avoid ffmpeg post-processing (which is the root cause of corruption)
+- Includes `--postprocessor-args "ffmpeg:-abort_on_error 1 -v warning"` for hard failures
+- Uses `--extractor-args "youtube:player_client=android"` for reliability
 
-If found, creates a "succeeded" job immediately with the existing track_id.
+### Configuration
 
-## Process Management
+- `FfprobeBin` field in `Config` — path to ffprobe binary. Auto-detected from `FfmpegBin` if empty. Validation is skipped if not set (graceful degradation).
 
-```go
-func runProcess(job *Job, logPrefix, bin string, args []string, _ string) error
-```
-- `cmd.StdoutPipe()` + `cmd.StderrPipe()` → streamed to job log
-- `consumeOutput()` reads line-by-line with 1MB buffer, prepends tool prefix
-- `appendLog()` caps at 500 lines (oldest dropped)
-- Cancel: `cmd.Process.Kill()`
+## File Locations
 
-## Failure Detection for SpotiFLAC
+- Main file: `backend/internal/downloader/downloader.go` (1188 LOC)
+- Key line ranges:
+  - `verifyDownloadedFile`: ~line 986
+  - `findDownloadedFile`: ~line 1016
+  - `validateOutput`: ~line 1050
+  - `runSearch` validation + retry block: ~line 882
+  - `run` Tier 2 validation + retry block: ~line 673
+  - `run` Tier 3 validation block: ~line 791
 
-Critical regex patterns:
-```go
-var spotiflacSummaryRE = regexp.MustCompile(`Summary:\s*(\d+)\s*Success,\s*(\d+)\s*Failed`)
-var spotiflacFoundTrackRE = regexp.MustCompile(`Found Track:\s+(.+?)\r?\n`)
-var spotiflacFailedTrackRE = regexp.MustCompile(`\[\d+/\d+\]\s+Failed:\s+(.+?)\s+\(`)
-```
+## Phase 2: Hardened yt-dlp Flags
 
-`extractFailedTrackQueries()` deduplicates track queries from SpotiFLAC output for use in fallback tiers.
+Added to both `run()` and `runSearch()` yt-dlp argument lists:
+- `--abort-on-error` — Fail fast on download errors
+- `--retries 3 --fragment-retries 10` — Resilience against network issues
+- `--postprocessor-args "ffmpeg:-abort_on_error 1 -v warning"` — Make ffmpeg failures fatal
+- `--extractor-args "youtube:player_client=android"` — More reliable YouTube access
 
-## Known Issues
+## Phase 3: Player Auto-Skip (Frontend)
 
-1. **Jobs lost on restart** — in-memory only, no persistence
-2. **No rate limiting** — rapid sequential downloads fire without throttling
-3. **SpotiFLAC exit code misleading** — always 0, requires log parsing
-4. **No MIME verification** — downloaded files indexed by extension, not verified
-5. **No cleanup on cancel** — partial downloads remain on disk
-6. **yt-dlp format assumption** — assumes mp3, but actual format may differ
+In `frontend/src/player/PlayerContext.tsx`:
+- `onError` handler auto-skips to next track after 1.5s delay
+- `loadAndPlay()` catch handler also auto-skips
+- `consecutiveErrorsRef` tracks consecutive failures (max 5) to prevent infinite loops
+- Counter resets on successful playback
 
-## Working Here
+## Phase 4: Scanner Size Validation
 
-- Changing download pipeline: edit `run()` method (3-tier flow)
-- Adding a new tool: add as Tier 4 in the pipeline
-- Adding job persistence: serialize jobs to DB
-- Adding rate limiting: add delays between downloads
-- Changing SpotiFLAC parsing: update the regex patterns
+In `backend/internal/scanner/scanner.go`:
+- `indexFile()` skips files < 10KB (logged as suspicious)
+- Catches corrupt files already in the library from before the fix
+
+## Phase 5: External Job API (v2.10.0)
+
+The `Job` struct gained a `Kind` field (`"music"` or `"podcast"`) and three new public methods on `*API` let other packages (notably `podcaster`) participate in the unified job system:
+
+- `RegisterExternalJob(kind, url, output, tool string) string` — creates a new job in `running` state, persists to `download_jobs`, returns the generated job ID
+- `AppendExternalLog(id, line string)` — appends a line to the in-memory log of an external job
+- `FinishExternalJob(id string, status Status, errMsg string)` — finalizes an external job (succeeded/failed) and writes the final state to the DB
+
+These methods don't acquire the concurrency semaphore or trigger rescan — the external caller handles those. The DB schema gained a `kind TEXT NOT NULL DEFAULT 'music'` column with idempotent migration.

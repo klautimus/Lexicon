@@ -1,6 +1,7 @@
 # backend/internal — Package Overview
 
 > **Parent:** [backend development context](../development_context.md)
+> **Last updated:** 2026-05-17
 
 ## Architecture Pattern
 
@@ -26,37 +27,48 @@ main.go
   ├── db.Open() + db.Migrate() → opens SQLite + runs schema
   ├── scanner.New(db)        → scan filesystem
   ├── library.New(db)        → track/album/artist CRUD
-  ├── playlists.New(db)      → playlist CRUD (new v2)
+  ├── models package         → canonical Track struct (shared by library, playlists)
+  ├── auth.RequireAPIKey     → middleware for write operations
+  ├── playlists.New(db)      → playlist CRUD
   ├── streamer.New(db)       → audio streaming
   ├── history.New(db)        → play recording
-  ├── analytics.New(db)      → SQL aggregations
-  ├── recommender.New(db, cfg) → DeepSeek integration
+  ├── analytics.New(db, tz)  → SQL aggregations
+  ├── websearch.New(enabled) → web search (standalone, no DB)
   ├── spotify.New(db, cfg)   → Spotify OAuth + sync
-  └── downloader.New(cfg, db, doRescan) → 3-tier download pipeline
+  ├── recommender.New(db, cfg, ws, spotify) → DeepSeek + web search + Spotify enrichment
+  ├── downloader.New(cfg, db, doRescan) → 3-tier download pipeline
+  ├── podcaster.New(db, cfg, doRescan) → podcast RSS + poddl subprocess
+  └── playerws.New()         → WebSocket hub for device control
 ```
 
 ## Packages
 
 | Package | LOC | Changed v2? | See |
 |---------|-----|:---:|-----|
-| `config` | 58 | ✅ | [config/](config/development_context.md) |
-| `db` | 160 | No | [db/](db/development_context.md) |
-| `scanner` | 101 | No | [scanner/](scanner/development_context.md) |
-| `library` | 261 | No | [library/](library/development_context.md) |
-| `streamer` | 44 | No | [streamer/](streamer/development_context.md) |
-| `history` | 87 | No | [history/](history/development_context.md) |
-| `analytics` | 123 | No | [analytics/](analytics/development_context.md) |
-| `recommender` | 388 | ✅ | [recommender/](recommender/development_context.md) |
-| `spotify` | 620 | No | [spotify/](spotify/development_context.md) |
-| `playlists` | 215 | 🆕 | [playlists/](playlists/development_context.md) |
-| `downloader` | 765 | 🆕 | [downloader/](downloader/development_context.md) |
+| `config` | 89 | ✅ | [config/](config/development_context.md) |
+| `db` | 224 | ✅ | [db/](db/development_context.md) |
+| `models` | 108 | 🆕 | — |
+| `auth` | 27 | 🆕 | — |
+| `scanner` | 108 | ✅ | [scanner/](scanner/development_context.md) |
+| `library` | 263 | ✅ | [library/](library/development_context.md) |
+| `streamer` | 45 | ✅ | [streamer/](streamer/development_context.md) |
+| `history` | 91 | ✅ | [history/](history/development_context.md) |
+| `analytics` | 160 | ✅ | [analytics/](analytics/development_context.md) |
+| `recommender` | 793 | ✅ | [recommender/](recommender/development_context.md) |
+| `spotify` | ~1001 | ✅ | [spotify/](spotify/development_context.md) |
+| `playlists` | 233 | 🆕 | [playlists/](playlists/development_context.md) |
+| `downloader` | 1182 | 🆕 | [downloader/](downloader/development_context.md) |
+| `podcaster` | ~721 | 🆕 | [podcaster/](podcaster/development_context.md) |
+| `playerws` | 269 | 🆕 | — |
+| `websearch` | ~540 | 🆕 | — |
 
 ## Cross-Package Concerns
 
-- **Track type duplication:** `Track` struct is defined in both `library` and `playlists`. Must keep in sync.
+- **Shared Track model:** `models.Track` is the canonical struct. Both `library` and `playlists` import from `models`. No duplication.
 - **DB handle sharing:** All packages receive the same `*sql.DB`. No connection pooling or per-package isolation.
-- **Error handling inconsistency:** Some packages ignore `rows.Scan()` errors (`_`), others return 500.
-- **No middleware:** No auth, no rate limiting, no request logging beyond chi's built-in Logger middleware.
+- **Error handling:** Most packages check `rows.Err()` after row iteration. A few read-only endpoints may still miss `rows.Scan()` errors — low impact.
+- **Auth:** `RequireAPIKey` middleware protects POST/PUT/DELETE. No-op when `LEXICON_API_KEY` is empty.
+- **CORS:** Dynamic `AllowOriginFunc` allows private network origins. Link-local (169.254.x.x) excluded.
 
 ## Dependencies (go.mod)
 
@@ -67,3 +79,7 @@ Key external packages:
 - `modernc.org/sqlite` — pure-Go SQLite driver (no CGO)
 - `github.com/dhowden/tag` — ID3/FLAC/MP4 tag reader
 - `github.com/google/uuid` — UUID generation (downloader)
+- `github.com/skip2/go-qrcode` — QR code generation
+- `github.com/PuerkitoBio/goquery` — HTML parsing (websearch)
+- `github.com/mmcdole/gofeed` — RSS feed parsing (podcaster)
+- `github.com/gorilla/websocket` — WebSocket hub (playerws)

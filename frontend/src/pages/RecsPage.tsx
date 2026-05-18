@@ -15,6 +15,7 @@ export default function RecsPage() {
   const [chatLog, setChatLog] = useState<{ role: "user" | "ai"; text: string }[]>([]);
   const [input, setInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [trackCount, setTrackCount] = useState(25);
 
   async function load() {
     const r = await api.recs();
@@ -92,7 +93,7 @@ export default function RecsPage() {
         </h1>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => downloads.generateAiPlaylist()}
+            onClick={() => downloads.generateAiPlaylist(false, trackCount)}
             disabled={downloads.generatingPlaylist}
             className="px-3 py-2 bg-panel2 border border-panel2 hover:border-accent text-text rounded-md font-medium flex items-center gap-2 disabled:opacity-60 transition"
           >
@@ -108,6 +109,21 @@ export default function RecsPage() {
             {loading ? "Thinking…" : recs ? "Refresh" : "Generate"}
           </button>
         </div>
+      </div>
+
+      {/* Track count slider */}
+      <div className="flex items-center gap-3 bg-panel rounded-lg px-4 py-3 border border-panel2">
+        <ListMusic size={14} className="text-accent" />
+        <span className="text-sm text-muted">Tracks:</span>
+        <input
+          type="range"
+          min={5}
+          max={50}
+          value={trackCount}
+          onChange={(e) => setTrackCount(Number(e.target.value))}
+          className="flex-1 accent-accent h-1"
+        />
+        <span className="text-sm font-medium w-8 text-right">{trackCount}</span>
       </div>
 
       {createdAt && (
@@ -126,7 +142,7 @@ export default function RecsPage() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {recs.items.map((it, i) => (
+            {recs.items && recs.items.map((it, i) => (
               <div
                 key={i}
                 className="bg-panel rounded-lg p-4 border border-panel2 hover:border-accent/40 transition"
@@ -217,7 +233,7 @@ export default function RecsPage() {
               )}
               {/* Regenerate button — only shown when playlist preview exists */}
               <button
-                onClick={() => { downloads.generateAiPlaylist(true); }}
+                onClick={() => { downloads.generateAiPlaylist(true, trackCount); }}
                 className="text-xs text-gray-400 hover:text-white transition-colors"
                 disabled={downloads.generatingPlaylist}
               >

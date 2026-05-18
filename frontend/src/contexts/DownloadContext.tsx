@@ -29,7 +29,7 @@ interface DownloadContextValue {
   // Actions
   downloadItem: (title: string, artist: string) => Promise<void>;
   trackDownload: (job: DownloadJob, name: string) => void;
-  generateAiPlaylist: (force?: boolean) => Promise<void>;
+  generateAiPlaylist: (force?: boolean, count?: number) => Promise<void>;
   createAiPlaylist: () => Promise<void>;
   clearPlaylistPreview: () => void;
   adoptPlaylistPreview: (playlist: PlaylistPayload) => void;
@@ -187,13 +187,13 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
     [downloadingIds, toast, trackDownload]
   );
 
-  const generateAiPlaylist = useCallback(async (force?: boolean) => {
+  const generateAiPlaylist = useCallback(async (force?: boolean, count?: number) => {
     setGeneratingPlaylist(true);
     setPlaylistPreview(null);
     setCreatedPlaylistId(null);
     setPlaylistTrackStatus({});
     try {
-      const data = await api.generatePlaylist(force);
+      const data = await api.generatePlaylist(force, count);
       setPlaylistPreview(data);
       const initStatus: Record<string, "pending"> = {};
       data.tracks.forEach((t) => {

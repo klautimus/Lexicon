@@ -10,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,9 +28,9 @@ type DeepSeekConfig struct {
 }
 
 type API struct {
-	db     *sql.DB
-	cfg    DeepSeekConfig
-	ws     *websearch.WebSearch
+	db      *sql.DB
+	cfg     DeepSeekConfig
+	ws      *websearch.WebSearch
 	spotify *spotify.API
 }
 
@@ -133,6 +135,14 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 
 	force := r.URL.Query().Get("force") == "true"
 
+	count, _ := strconv.Atoi(r.URL.Query().Get("count"))
+	if count <= 0 {
+		count = 25
+	}
+	if count > 100 {
+		count = 100
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
@@ -184,7 +194,7 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	prompt := `Given this user's listening profile, generate a cohesive playlist.
+	prompt := fmt.Sprintf(`Given this user's listening profile, generate a cohesive playlist.
 Return ONLY valid JSON with this exact shape:
 {
   "name": "catchy playlist name",
@@ -195,14 +205,14 @@ Return ONLY valid JSON with this exact shape:
 }
 
 Rules:
-- 8-12 tracks
+- Generate exactly %d tracks
 - Name should be creative and thematic (not generic like "My Playlist")
 - Mix of songs the user likely has and new discoveries
 - Be specific and personal — reference patterns from the profile
 - Output ONLY valid JSON, no prose, no code fences.
-` + searchContext + `
+%s
 PROFILE:
-` + profile
+%s`, count, searchContext, profile)
 
 	reply, err := a.deepseekChat(ctx, []map[string]string{
 		{"role": "system", "content": "You are a music curator. Respond with JSON only."},
@@ -262,6 +272,15 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Extract count from user message (e.g., "30-track", "50 songs")
+	count := extractCountFromMessage(req.Message)
+	if count <= 0 {
+		count = 25
+	}
+	if count > 100 {
+		count = 100
+	}
+
 	// Web search enrichment for album/artist queries
 	searchContext := ""
 	if q := websearch.DetectSearchQuery(req.Message); q != "" && a.ws != nil {
@@ -285,7 +304,7 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	system := `You are a music curator. ALWAYS respond with ONLY a single valid JSON object. No markdown, no prose outside the JSON, no code fences.
+	system := fmt.Sprintf(`You are a music curator. ALWAYS respond with ONLY a single valid JSON object. No markdown, no prose outside the JSON, no code fences.
 
 If the user asks for a playlist, use this shape:
 {"message":"A short conversational reply","playlist":{"name":"Creative Playlist Name","description":"1-2 sentence vibe","tracks":[{"title":"...","artist":"...","reason":"..."}]}}
@@ -294,16 +313,15 @@ If the user asks a normal question (not about making a playlist), use this shape
 {"message":"Your concise answer here."}
 
 Rules:
-- For playlist requests: 8-12 tracks, creative thematic name, reference patterns from the profile.
+- For playlist requests: generate exactly %d tracks, creative thematic name, reference patterns from the profile.
 - For normal questions: answer concisely in the "message" field.
 - ALWAYS include the "message" field.
 - NEVER output text outside the JSON object.
-` + searchContext + `
+%s
 ---
 USER LISTENING PROFILE:
-` + profile + `
 ---
-REMEMBER: Always return a JSON object with a "message" field.`
+REMEMBER: Always return a JSON object with a "message" field.`, count, searchContext, profile)
 	reply, err := a.deepseekChatWithRetry(ctx, []map[string]string{
 		{"role": "system", "content": system},
 		{"role": "user", "content": req.Message},
@@ -758,3 +776,19 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
 }
+
+// extractCountFromMessage parses track count from user messages like
+// "30-track playlist", "50 songs", "20 tracks", "100 song playlist".
+// Returns 0 if no count is found.
+func extractCountFromMessage(msg string) int {
+	re := regexp.MustCompile(`(\d+)\s*(?:[- ]?(?:track|song))`)
+	matches := re.FindStringSubmatch(strings.ToLower(msg))
+	if len(matches) >= 2 {
+		n, _ := strconv.Atoi(matches[1])
+		if n > 0 && n <= 100 {
+			return n
+		}
+	}
+	return 0
+}
+

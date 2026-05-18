@@ -382,3 +382,58 @@ func FetchFollowedArtists(ctx context.Context, accessToken string, limit int) ([
 	}
 	return result.Artists.Items, nil
 }
+
+// SpotifyDevice represents a Spotify Connect device
+type SpotifyDevice struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	IsActive      bool   `json:"is_active"`
+	IsRestricted  bool   `json:"is_restricted"`
+	VolumePercent int    `json:"volume_percent"`
+}
+
+// SpotifyDevicesResponse is the API response for /me/player/devices
+type SpotifyDevicesResponse struct {
+	Devices []SpotifyDevice `json:"devices"`
+}
+
+// GetDevices returns all available Spotify Connect devices
+func GetDevices(ctx context.Context, accessToken string) ([]SpotifyDevice, error) {
+	resp, err := spotifyGET(ctx, accessToken, "/me/player/devices", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("devices %d: %s", resp.StatusCode, string(body))
+	}
+	var result SpotifyDevicesResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return result.Devices, nil
+}
+
+// TransferPlayback transfers playback to a specific device
+func TransferPlayback(ctx context.Context, accessToken string, deviceID string, play bool) error {
+	body := fmt.Sprintf(`{"device_ids":["%s"],"play":%t}`, deviceID, play)
+	req, err := http.NewRequestWithContext(ctx, "PUT",
+		"https://api.spotify.com/v1/me/player", strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("transfer %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}

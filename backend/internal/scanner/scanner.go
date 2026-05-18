@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,12 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 		return nil
 	}
 	mtime := info.ModTime().Unix()
+
+	// Skip files that are too small to be valid audio (< 10KB)
+	if info.Size() < 10240 {
+		log.Printf("[scanner] skipping suspiciously small file: %s (%d bytes)", path, info.Size())
+		return nil
+	}
 
 	var existingMtime sql.NullInt64
 	_ = s.db.QueryRowContext(ctx, "SELECT mtime FROM tracks WHERE path=?", path).Scan(&existingMtime)

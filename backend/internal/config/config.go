@@ -29,6 +29,8 @@ type Config struct {
 	FfmpegBin          string
 	DownloadConcurrency int
 	WebSearchEnabled   bool
+	PoddlBin           string
+	PodcastDir         string
 }
 
 func Load() Config {
@@ -54,6 +56,8 @@ func Load() Config {
 		YtdlpBin:           env("YTDLP_BIN", ""),
 		YtdlpFormat:        env("YTDLP_FORMAT", "mp3"),
 		FfmpegBin:          env("FFMPEG_BIN", ""),
+		PoddlBin:           env("PODDL_BIN", ""),
+		PodcastDir:         env("PODCAST_DIR", ""),
 		WebSearchEnabled:   env("WEBSEARCH_ENABLED", "true") == "true",
 	}
 
