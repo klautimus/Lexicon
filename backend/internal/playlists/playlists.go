@@ -251,12 +251,21 @@ func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "track_id is required", 400)
 		return
 	}
-	_, err := a.db.ExecContext(r.Context(), `
+	res, err := a.db.ExecContext(r.Context(), `
 		INSERT INTO playlist_items (playlist_id, track_id, position)
 		SELECT ?, ?, COALESCE((SELECT MAX(position)+1 FROM playlist_items WHERE playlist_id=?), 0)`,
 		id, req.TrackID, id)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if rows == 0 {
+		http.Error(w, "track not added", 500)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
