@@ -265,9 +265,18 @@ func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 func (a *API) removeTrack(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	position, _ := strconv.ParseInt(chi.URLParam(r, "position"), 10, 64)
-	_, err := a.db.ExecContext(r.Context(), `DELETE FROM playlist_items WHERE playlist_id=? AND position=?`, id, position)
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlist_items WHERE playlist_id=? AND position=?`, id, position)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if rows == 0 {
+		http.Error(w, "track not found", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
