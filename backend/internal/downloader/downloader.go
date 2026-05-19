@@ -234,6 +234,9 @@ func (a *API) Mount(r chi.Router) {
 	r.Get("/api/download/jobs", a.listJobs)
 	r.Get("/api/download/jobs/{id}", a.getJob)
 	r.Post("/api/download/jobs/{id}/cancel", a.cancelJob)
+	// Track upgrade endpoints (re-download with new pipeline)
+	r.Post("/api/library/upgrade", a.upgradeTrack)
+	r.Post("/api/library/upgrade-all", a.upgradeAll)
 }
 
 // ----- HTTP -----
@@ -721,12 +724,11 @@ func (a *API) run(job *Job) {
 	outputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
 	ytdlpArgs := []string{
 		ytdlpSearch,
-		"--extract-audio",
-		"--audio-format", ytdlpFormat,
-		"--audio-quality", "0",
+		"-f", "bestaudio/best",
 		"--no-playlist",
 		"--add-metadata",
 		"--embed-thumbnail",
+		"--convert-thumbnails", "jpg",
 		"--newline",
 		"--no-warnings",
 		// Harden: make failures fatal and add retries
@@ -761,14 +763,15 @@ func (a *API) run(job *Job) {
 				a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
 				retrySearch := "ytsearch2:" + strings.TrimPrefix(ytdlpSearch, "ytsearch1:")
 				retryOutputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
-				retryArgs := []string{
-					retrySearch, "--extract-audio", "--audio-format", "m4a",
-					"--audio-quality", "0", "--no-playlist", "--add-metadata",
-					"--embed-thumbnail", "--newline", "--no-warnings",
-					"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
-					"--extractor-args", "youtube:player_client=android",
-					"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
-				}
+			retryArgs := []string{
+				retrySearch,
+				"-f", "bestaudio/best",
+				"--no-playlist", "--add-metadata",
+				"--embed-thumbnail", "--convert-thumbnails", "jpg", "--newline", "--no-warnings",
+				"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
+				"--extractor-args", "youtube:player_client=android",
+				"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
+			}
 				if a.cfg.FfmpegBin != "" {
 					retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
 				}
@@ -930,13 +933,12 @@ func (a *API) runSearch(job *Job) {
 	outputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
 	ytdlpArgs := []string{
 		ytdlpSearch,
-		"--extract-audio",
-		"--audio-format", ytdlpFormat,
-		"--audio-quality", "0",
+		"-f", "bestaudio/best",
 		"--no-playlist",
 		"--match-filter", "duration < 600",
 		"--add-metadata",
 		"--embed-thumbnail",
+		"--convert-thumbnails", "jpg",
 		"--newline",
 		"--no-warnings",
 		// Harden: make failures fatal and add retries
@@ -976,9 +978,10 @@ func (a *API) runSearch(job *Job) {
 			retrySearch := "ytsearch2:" + strings.TrimPrefix(job.URL, "ytsearch1:")
 			retryOutputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
 			retryArgs := []string{
-				retrySearch, "--extract-audio", "--audio-format", "m4a",
-				"--audio-quality", "0", "--no-playlist", "--add-metadata",
-				"--embed-thumbnail", "--newline", "--no-warnings",
+				retrySearch,
+				"-f", "bestaudio/best",
+				"--no-playlist", "--add-metadata",
+				"--embed-thumbnail", "--convert-thumbnails", "jpg", "--newline", "--no-warnings",
 				"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
 				"--extractor-args", "youtube:player_client=android",
 				"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
@@ -1004,6 +1007,32 @@ func (a *API) runSearch(job *Job) {
 	a.finish(job, StatusSucceeded, "")
 	if a.rescan != nil {
 		go a.rescan()
+	}
+
+	// Try to resolve the downloaded file to a track ID so the frontend
+	// doesn't have to race with the scanner. Poll the DB for up to 2 minutes
+	// checking for a track whose path matches the downloaded file.
+	if a.db != nil {
+		go func() {
+			dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+			if dlFile == "" {
+				return
+			}
+			for i := 0; i < 40; i++ {
+				time.Sleep(3 * time.Second)
+				var id int64
+				err := a.db.QueryRowContext(context.Background(),
+					`SELECT id FROM tracks WHERE path=? LIMIT 1`, dlFile).Scan(&id)
+				if err == nil && id > 0 {
+					a.mu.Lock()
+					job.TrackID = id
+					a.mu.Unlock()
+					log.Printf("[downloader] runSearch: resolved track %d for %s", id, dlFile)
+					return
+				}
+			}
+			log.Printf("[downloader] runSearch: could not resolve track for %s after 2min", dlFile)
+		}()
 	}
 }
 
@@ -1055,7 +1084,7 @@ func (a *API) appendLog(job *Job, line string) {
 func isValidAudioFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".wma", ".opus":
+	case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".wma", ".opus", ".mp4", ".webm":
 		return true
 	}
 	// Try MIME detection as fallback
@@ -1110,7 +1139,7 @@ func (a *API) findDownloadedFile(before time.Time) string {
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
-		case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".opus", ".webm":
+		case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".opus", ".webm", ".mp4":
 			if info.ModTime().After(cutoff) && info.ModTime().Before(before.Add(5*time.Minute)) {
 				if info.ModTime().After(bestTime) {
 					bestTime = info.ModTime()
@@ -1264,4 +1293,206 @@ If the query is ambiguous, make your best guess. Output ONLY JSON, no markdown.`
 		return deepseekMetadata{}, err
 	}
 	return out, nil
+}
+
+// ----- Track upgrade (re-download with new pipeline) -----
+
+type upgradeReq struct {
+	TrackID int64 `json:"track_id"`
+}
+
+type upgradeAllReq struct {
+	Limit int `json:"limit"` // max tracks to upgrade, 0 = all
+}
+
+// upgradeTrack re-downloads a single track using the new bestaudio pipeline.
+// It deletes the old file, runs a search-based download, and updates the DB.
+func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.YtdlpBin == "" {
+		http.Error(w, "yt-dlp not configured. Set YTDLP_BIN in backend/.env.", 400)
+		return
+	}
+	var req upgradeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if req.TrackID <= 0 {
+		http.Error(w, "track_id is required", 400)
+		return
+	}
+
+	// Look up the track
+	var oldPath, title, artist string
+	err := a.db.QueryRowContext(r.Context(),
+		`SELECT path, IFNULL(title,''), IFNULL(artist,'') FROM tracks WHERE id=? AND media_kind='music'`,
+		req.TrackID).Scan(&oldPath, &title, &artist)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "track not found", 404)
+			return
+		}
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	// Build search query from title + artist
+	query := strings.TrimSpace(title + " " + artist)
+	if query == "" {
+		query = strings.TrimSuffix(filepath.Base(oldPath), filepath.Ext(oldPath))
+	}
+
+	// Delete old file (best-effort)
+	if oldPath != "" {
+		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[upgrade] failed to remove old file %s: %v", oldPath, err)
+		}
+	}
+
+	// Enqueue a search-based download (uses the new bestaudio pipeline)
+	job := &Job{
+		ID:        uuid.NewString(),
+		URL:       query,
+		Output:    a.cfg.Output,
+		Status:    StatusQueued,
+		StartedAt: time.Now().Unix(),
+		Log:       []string{},
+		IsSearch:  true,
+		Kind:      "music",
+		TrackID:   req.TrackID,
+	}
+	a.mu.Lock()
+	a.jobs[job.ID] = job
+	a.order = append([]string{job.ID}, a.order...)
+	if len(a.order) > a.maxKeep {
+		for _, oldID := range a.order[a.maxKeep:] {
+			delete(a.jobs, oldID)
+		}
+		a.order = a.order[:a.maxKeep]
+	}
+	a.mu.Unlock()
+
+	if a.db != nil {
+		_, _ = a.db.Exec(
+			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind, track_id) VALUES(?, ?, ?, ?, ?, 1, ?, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.TrackID)
+	}
+
+	go a.runSearchWithTrackID(job, req.TrackID)
+	writeJSON(w, map[string]interface{}{
+		"job_id":  job.ID,
+		"query":   query,
+		"status":  "queued",
+		"message": "Track upgrade queued. Poll /api/download/jobs/" + job.ID + " for status.",
+	})
+}
+
+// runSearchWithTrackID is like runSearch but updates the track's path after download.
+func (a *API) runSearchWithTrackID(job *Job, trackID int64) {
+	// Run the standard search pipeline
+	a.runSearch(job)
+
+	// If successful, update the track's file path
+	a.mu.Lock()
+	status := job.Status
+	a.mu.Unlock()
+
+	if status != StatusSucceeded {
+		log.Printf("[upgrade] job %s did not succeed (status=%s), skipping path update", job.ID, status)
+		return
+	}
+
+	// Find the downloaded file
+	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+	if dlFile == "" {
+		log.Printf("[upgrade] job %s succeeded but could not find downloaded file", job.ID)
+		return
+	}
+
+	// Update the track record with the new file path
+	_, err := a.db.Exec(`UPDATE tracks SET path=?, mime=?, size_bytes=?, mtime=? WHERE id=?`,
+		dlFile,
+		audioMIME(dlFile),
+		fileSize(dlFile),
+		time.Now().Unix(),
+		trackID)
+	if err != nil {
+		log.Printf("[upgrade] failed to update track %d path: %v", trackID, err)
+	} else {
+		log.Printf("[upgrade] track %d upgraded: %s", trackID, dlFile)
+	}
+
+	// Trigger rescan to pick up new metadata
+	if a.rescan != nil {
+		go a.rescan()
+	}
+}
+
+// audioMIME returns the MIME type for a file based on its extension.
+func audioMIME(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	m := map[string]string{
+		".mp3":  "audio/mpeg",
+		".flac": "audio/flac",
+		".m4a":  "audio/mp4",
+		".m4b":  "audio/mp4",
+		".aac":  "audio/aac",
+		".ogg":  "audio/ogg",
+		".opus": "audio/opus",
+		".wav":  "audio/wav",
+		".webm": "audio/webm",
+		".mp4":  "audio/mp4",
+	}
+	if mime, ok := m[ext]; ok {
+		return mime
+	}
+	return "application/octet-stream"
+}
+
+// fileSize returns the file size in bytes, or 0 on error.
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// upgradeAll enqueues all music tracks for upgrade.
+func (a *API) upgradeAll(w http.ResponseWriter, r *http.Request) {
+	var req upgradeAllReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	// Get all music track IDs
+	query := `SELECT id FROM tracks WHERE media_kind='music' ORDER BY id`
+	rows, err := a.db.QueryContext(r.Context(), query)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+
+	var trackIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		trackIDs = append(trackIDs, id)
+	}
+
+	limit := req.Limit
+	if limit <= 0 || limit > len(trackIDs) {
+		limit = len(trackIDs)
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"total_tracks":   len(trackIDs),
+		"upgrade_limit":  limit,
+		"message":        fmt.Sprintf("Found %d tracks. Use POST /api/library/upgrade with {\"track_id\": N} for each track, or use the bulk upgrade endpoint.", len(trackIDs)),
+		"track_ids":      trackIDs[:limit],
+	})
 }

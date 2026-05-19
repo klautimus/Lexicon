@@ -100,3 +100,19 @@ The `Job` struct gained a `Kind` field (`"music"` or `"podcast"`) and three new 
 - `FinishExternalJob(id string, status Status, errMsg string)` — finalizes an external job (succeeded/failed) and writes the final state to the DB
 
 These methods don't acquire the concurrency semaphore or trigger rescan — the external caller handles those. The DB schema gained a `kind TEXT NOT NULL DEFAULT 'music'` column with idempotent migration.
+
+## Phase 6: Post-Download Track Resolution (v3.3.5)
+
+### Problem
+AI playlist creation had a race condition: after yt-dlp downloaded a file, the async rescan hadn't indexed it yet when the frontend tried to find the track in the library. This caused tracks to be added to the playlist with wrong IDs or marked as failed.
+
+### Changes Made
+
+#### Backend (`downloader.go` — `runSearch`)
+After yt-dlp succeeds and the async rescan is triggered, a background goroutine polls the database for up to 2 minutes (40 attempts × 3s) looking for a track whose `path` matches the downloaded file. When found, it sets `job.TrackID`, which the frontend can then use as Case A (immediate track_id) instead of racing with the scanner.
+
+#### Frontend (`contexts/DownloadContext.tsx` — `createAiPlaylist`)
+- Sub-case B2: increased retry budget from 15×2s (30s) to 60×3s (3 minutes)
+- Added explicit `api.scan()` call before starting search retries to kick the scanner
+- Added 3-second initial delay after scan trigger to give scanner time to start
+- Added user-visible error toast when a track can't be found after all retries

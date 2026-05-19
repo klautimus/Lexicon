@@ -30,14 +30,18 @@ export default function PlaylistPage() {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
 
+  const [error, setError] = useState<string | null>(null);
+
   async function load() {
     if (!id) return;
     try {
       const data = await api.playlist(Number(id));
       setPlaylist(data);
       setEditName(data.name);
-    } catch {
-      // ignore
+      setError(null);
+    } catch (e) {
+      console.error("[PlaylistPage] failed to load playlist", id, e);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -94,6 +98,9 @@ export default function PlaylistPage() {
           <ArrowLeft size={14} /> Back to playlists
         </button>
         <p className="text-muted">Playlist not found.</p>
+        {error && (
+          <p className="text-xs text-red-400 mt-1">Error: {error}</p>
+        )}
       </div>
     );
   }

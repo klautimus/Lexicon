@@ -68,7 +68,7 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
-	access, err := ensureToken(ctx, s.db, s.cfg.ClientID)
+	access, err := ensureToken(ctx, s.db, s.cfg.ClientID, s.cfg.ClientSecret)
 	if err != nil {
 		log.Printf("[spotify] token: %v", err)
 		return err

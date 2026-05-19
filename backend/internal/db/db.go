@@ -234,5 +234,32 @@ func Migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_download_jobs_kind ON download_jobs(kind)`); err != nil {
 		return err
 	}
+	// Add loudness measurement columns
+	if !columnExists(db, "tracks", "loudness_integrated") {
+		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN loudness_integrated REAL`); err != nil {
+			return err
+		}
+	}
+	if !columnExists(db, "tracks", "loudness_true_peak") {
+		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN loudness_true_peak REAL`); err != nil {
+			return err
+		}
+	}
+	if !columnExists(db, "tracks", "loudness_range") {
+		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN loudness_range REAL`); err != nil {
+			return err
+		}
+	}
+	// Add playback position tracking to podcast_episodes
+	if !columnExists(db, "podcast_episodes", "playback_position_sec") {
+		if _, err := db.Exec(`ALTER TABLE podcast_episodes ADD COLUMN playback_position_sec INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if !columnExists(db, "podcast_episodes", "listened") {
+		if _, err := db.Exec(`ALTER TABLE podcast_episodes ADD COLUMN listened INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
 	return nil
 }

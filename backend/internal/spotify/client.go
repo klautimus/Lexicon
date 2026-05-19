@@ -16,10 +16,10 @@ import (
 
 // ValidAccessToken returns a non-expired access token, refreshing if necessary.
 func (a *API) ValidAccessToken(ctx context.Context) (string, error) {
-	return ensureToken(ctx, a.db, a.cfg.ClientID)
+	return ensureToken(ctx, a.db, a.cfg.ClientID, a.cfg.ClientSecret)
 }
 
-func ensureToken(ctx context.Context, db *sql.DB, clientID string) (string, error) {
+func ensureToken(ctx context.Context, db *sql.DB, clientID, clientSecret string) (string, error) {
 	var (
 		access, refresh string
 		expiresAt       int64
@@ -36,6 +36,9 @@ func ensureToken(ctx context.Context, db *sql.DB, clientID string) (string, erro
 		form.Set("grant_type", "refresh_token")
 		form.Set("refresh_token", refresh)
 		form.Set("client_id", clientID)
+		if clientSecret != "" {
+			form.Set("client_secret", clientSecret)
+		}
 		tr, err := postToken(ctx, form)
 		if err != nil {
 			return "", fmt.Errorf("refresh failed: %w", err)

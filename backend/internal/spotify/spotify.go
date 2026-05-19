@@ -19,9 +19,10 @@ type verifierEntry struct {
 }
 
 type Config struct {
-	ClientID    string
-	RedirectURI string
-	FrontendURL string
+	ClientID     string
+	ClientSecret string
+	RedirectURI  string
+	FrontendURL  string
 }
 
 type API struct {

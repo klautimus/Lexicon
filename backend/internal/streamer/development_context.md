@@ -1,8 +1,8 @@
 # streamer — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/streamer/streamer.go` (45 LOC)
-> **Last updated:** 2026-05-17
+> **File:** `backend/internal/streamer/streamer.go` (53 LOC)
+> **Last updated:** 2026-05-18
 
 ## Purpose
 
@@ -16,12 +16,21 @@ GET /api/stream/{id}
 
 ## Handler
 
-1. Parse `id` from URL param
-2. Query `SELECT path, mime FROM tracks WHERE id=?`
-3. `os.Open(path)`
-4. `f.Stat()` for size/modtime
-5. Sets `Content-Type`, `Accept-Ranges: bytes`, `Cache-Control: public, max-age=86400`
-6. `http.ServeContent(w, r, name, modTime, f)` — handles Range headers automatically
+1. Handle `OPTIONS` preflight — return 200 immediately (for CORS)
+2. Parse `id` from URL param
+3. Query `SELECT path, mime FROM tracks WHERE id=?`
+4. `os.Open(path)`
+5. `f.Stat()` for size/modtime
+6. Set CORS headers (`Access-Control-Allow-Origin`, etc.) + `Content-Type`, `Accept-Ranges: bytes`, `Cache-Control: public, max-age=86400`
+7. `http.ServeContent(w, r, name, modTime, f)` — handles Range headers automatically
+
+## CORS Headers
+
+Set on every response to enable Web Audio API access from cross-origin contexts:
+- `Access-Control-Allow-Origin: *`
+- `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`
+- `Access-Control-Allow-Headers: Range, Accept-Encoding`
+- `Access-Control-Expose-Headers: Content-Length, Content-Range`
 
 ## Working Here
 

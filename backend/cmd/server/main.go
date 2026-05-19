@@ -67,9 +67,10 @@ func main() {
 
 	// Create Spotify API first so we can pass it to the recommender
 	spotifyAPI := spotify.New(database, spotify.Config{
-		ClientID:    cfg.SpotifyClientID,
-		RedirectURI: cfg.SpotifyRedirectURI,
-		FrontendURL: cfg.SpotifyFrontendURL,
+		ClientID:     cfg.SpotifyClientID,
+		ClientSecret: cfg.SpotifyClientSecret,
+		RedirectURI:  cfg.SpotifyRedirectURI,
+		FrontendURL:  cfg.SpotifyFrontendURL,
 	})
 
 	rec := recommender.New(database, recommender.DeepSeekConfig{

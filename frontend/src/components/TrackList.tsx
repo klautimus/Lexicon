@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { Play, MoreHorizontal, Plus, ListMusic, Trash2 } from "lucide-react";
+import { Play, MoreHorizontal, Plus, ListMusic, Trash2, Download } from "lucide-react";
 import { api, Track, Playlist } from "../lib/api";
 import { usePlayer } from "../player/PlayerContext";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { useToast } from "../contexts/ToastContext";
 
 export default function TrackList({ tracks, onDelete }: { tracks: Track[]; onDelete?: (trackId: number) => void }) {
   const isMobile = useIsMobile();
@@ -58,6 +59,7 @@ function TrackRow({
   onDelete?: (trackId: number) => void;
 }) {
   const p = usePlayer();
+  const toast = useToast();
   const [open, setOpen] = useState(false);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [creating, setCreating] = useState(false);
@@ -133,6 +135,15 @@ function TrackRow({
       setDeleteError("Failed to delete");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function handleUpgrade() {
+    try {
+      const result = await api.upgradeTrack(track.id);
+      toast.info(`Upgrading "${track.title}" — ${result.message || "queued"}`);
+    } catch {
+      toast.error(`Failed to upgrade "${track.title}"`);
     }
   }
 
@@ -261,12 +272,25 @@ function TrackRow({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        setOpen(false);
+                        handleUpgrade();
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-yellow-400"
+                    >
+                      <Download size={14} />
+                      Upgrade Quality
+                    </button>
+                  </div>
+                  <div className="border-t border-panel2 mt-1 pt-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setConfirmingDelete(true);
                       }}
                       className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-red-400"
                     >
                       <Trash2 size={14} />
-                      Delete from Library
+                      Delete
                     </button>
                   </div>
                 </>
@@ -308,6 +332,7 @@ function MobileTrackCard({
   onDelete?: (trackId: number) => void;
 }) {
   const p = usePlayer();
+  const toast = useToast();
   const [open, setOpen] = useState(false);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [creating, setCreating] = useState(false);
@@ -384,6 +409,15 @@ function MobileTrackCard({
       setDeleteError("Failed to delete");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function handleUpgrade() {
+    try {
+      const result = await api.upgradeTrack(track.id);
+      toast.info(`Upgrading "${track.title}" — ${result.message || "queued"}`);
+    } catch {
+      toast.error(`Failed to upgrade "${track.title}"`);
     }
   }
 
@@ -499,30 +533,43 @@ function MobileTrackCard({
                     </button>
                   ))
                 )}
-                <div className="border-t border-panel2 mt-1 pt-1">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setCreating(true);
-                    }}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-accent"
-                  >
-                    <Plus size={14} />
-                    Create new playlist...
-                  </button>
-                </div>
-                <div className="border-t border-panel2 mt-1 pt-1">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmingDelete(true);
-                    }}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-red-400"
-                  >
-                    <Trash2 size={14} />
-                    Delete from Library
-                  </button>
-                </div>
+                  <div className="border-t border-panel2 mt-1 pt-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCreating(true);
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-accent"
+                    >
+                      <Plus size={14} />
+                      Create new playlist...
+                    </button>
+                  </div>
+                  <div className="border-t border-panel2 mt-1 pt-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpen(false);
+                        handleUpgrade();
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-yellow-400"
+                    >
+                      <Download size={14} />
+                      Upgrade Quality
+                    </button>
+                  </div>
+                  <div className="border-t border-panel2 mt-1 pt-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmingDelete(true);
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-red-400"
+                    >
+                      <Trash2 size={14} />
+                      Delete
+                    </button>
+                  </div>
               </>
             )}
           </div>

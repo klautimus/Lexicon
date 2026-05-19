@@ -138,11 +138,29 @@ export default function PodcastsPage() {
     }
   };
 
-  const handlePlayEpisode = async (episodeId: number, title: string) => {
+  const handlePlayEpisode = async (episodeId: number, title: string, fallbackPositionSec: number = 0) => {
     try {
       const { track_id } = await api.podcastEpisodeTrack(episodeId);
       const track = await api.track(track_id);
+      // Fetch the latest saved position from the backend (the episodes list may be stale)
+      let startPositionSec = fallbackPositionSec;
+      try {
+        const posData = await api.podcastEpisodePosition(episodeId);
+        if (posData.position_sec > 0) {
+          startPositionSec = posData.position_sec;
+        }
+      } catch {
+        // ignore — use fallback
+      }
+      await player.setPodcastEpisodeId(episodeId);
       player.play([track], 0);
+      // If resuming from a saved position, seek after a short delay
+      // (the audio element needs time to load the source)
+      if (startPositionSec > 0) {
+        setTimeout(() => {
+          player.seek(startPositionSec);
+        }, 500);
+      }
     } catch (e: any) {
       toast.error("Cannot play episode: " + (e.message || "track not found — rescan may be in progress"));
     }
@@ -268,14 +286,29 @@ export default function PodcastsPage() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {episodes && episodes.map((ep) => (
+                    {episodes && episodes.map((ep) => {
+                      const hasProgress = ep.playback_position_sec > 0 && !ep.listened;
+                      const progressPct = ep.duration_sec > 0
+                        ? Math.min(100, Math.round((ep.playback_position_sec / ep.duration_sec) * 100))
+                        : 0;
+                      const formatTime = (s: number) => {
+                        const m = Math.floor(s / 60);
+                        const sec = s % 60;
+                        return `${m}:${sec.toString().padStart(2, '0')}`;
+                      };
+                      return (
                       <div
                         key={ep.id}
                         className="bg-panel rounded-lg p-3 border border-panel2 hover:border-accent/30 transition-colors"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex-1 min-w-0">
-                            <h3 className="text-sm font-medium truncate">{ep.title}</h3>
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-sm font-medium truncate">{ep.title}</h3>
+                              {ep.listened && (
+                                <span className="text-xs text-muted shrink-0">✓ Listened</span>
+                              )}
+                            </div>
                             <div className="flex items-center gap-2 mt-1">
                               {ep.pub_date > 0 && (
                                 <span className="text-xs text-muted">
@@ -284,7 +317,7 @@ export default function PodcastsPage() {
                               )}
                               {ep.duration_sec > 0 && (
                                 <span className="text-xs text-muted">
-                                  {Math.floor(ep.duration_sec / 60)} min
+                                  {formatTime(ep.duration_sec)}
                                 </span>
                               )}
                               {ep.downloaded && (
@@ -298,6 +331,22 @@ export default function PodcastsPage() {
                                 </span>
                               )}
                             </div>
+                            {/* Progress bar for partially listened episodes */}
+                            {hasProgress && progressPct > 0 && (
+                              <div className="mt-2">
+                                <div className="flex items-center gap-2">
+                                  <div className="flex-1 h-1 bg-panel2 rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full bg-accent rounded-full transition-all"
+                                      style={{ width: `${progressPct}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs text-muted shrink-0">
+                                    {formatTime(ep.playback_position_sec)} / {formatTime(ep.duration_sec)}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
                             {ep.description && (
                               <p className="text-xs text-muted mt-1 line-clamp-2">{ep.description}</p>
                             )}
@@ -305,9 +354,9 @@ export default function PodcastsPage() {
                           <div className="flex items-center gap-1">
                             {ep.downloaded && ep.file_path ? (
                               <button
-                                onClick={() => handlePlayEpisode(Number(ep.id), ep.title)}
+                                onClick={() => handlePlayEpisode(Number(ep.id), ep.title, hasProgress ? ep.playback_position_sec : 0)}
                                 className="p-2 rounded-md hover:bg-panel2 transition-colors text-accent"
-                                title="Play"
+                                title={hasProgress ? `Resume from ${formatTime(ep.playback_position_sec)}` : "Play"}
                               >
                                 <Play size={14} />
                               </button>
@@ -328,7 +377,8 @@ export default function PodcastsPage() {
                           </div>
                         </div>
                       </div>
-                    ))}
+                    );
+                  })}
                   </div>
                 )}
               </>

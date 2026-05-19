@@ -7,26 +7,29 @@ import (
 
 // Track is the canonical Track type used throughout Lexicon.
 type Track struct {
-	ID          int64  `json:"id"`
-	Title       string `json:"title"`
-	Artist      string `json:"artist"`
-	AlbumArtist string `json:"album_artist"`
-	Album       string `json:"album"`
-	TrackNo     int    `json:"track_no"`
-	DiscNo      int    `json:"disc_no"`
-	Year        int    `json:"year"`
-	Genre       string `json:"genre"`
-	DurationSec int    `json:"duration_sec"`
-	MediaKind   string `json:"media_kind"`
-	Mime        string `json:"mime"`
-	SpotifyID   string `json:"spotify_id,omitempty"`
-	ExternalURL string `json:"external_url,omitempty"`
+	ID                int64   `json:"id"`
+	Title             string  `json:"title"`
+	Artist            string  `json:"artist"`
+	AlbumArtist       string  `json:"album_artist"`
+	Album             string  `json:"album"`
+	TrackNo           int     `json:"track_no"`
+	DiscNo            int     `json:"disc_no"`
+	Year              int     `json:"year"`
+	Genre             string  `json:"genre"`
+	DurationSec       int     `json:"duration_sec"`
+	MediaKind         string  `json:"media_kind"`
+	Mime              string  `json:"mime"`
+	SpotifyID         string  `json:"spotify_id,omitempty"`
+	ExternalURL       string  `json:"external_url,omitempty"`
+	LoudnessIntegrated float64 `json:"loudness_integrated,omitempty"`
+	LoudnessTruePeak  float64 `json:"loudness_true_peak,omitempty"`
+	LoudnessRange     float64 `json:"loudness_range,omitempty"`
 }
 
 // TrackCols matches the actual tracks table schema exactly.
 // Column order must match ScanTrack's Scan argument order.
 // Uses raw column names — NULLs are handled by sql.NullString in ScanTrack.
-const TrackCols = `id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, spotify_id, external_url`
+const TrackCols = `id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, spotify_id, external_url, loudness_integrated, loudness_true_peak, loudness_range`
 
 // TrackColsAliased returns TrackCols with a table prefix for JOIN queries
 // where column names might be ambiguous (e.g., tracks_fts has title, artist, etc.).
@@ -36,6 +39,7 @@ func TrackColsAliased(alias string) string {
 		"track_no", "disc_no", "year", "genre",
 		"duration_sec", "media_kind", "mime",
 		"spotify_id", "external_url",
+		"loudness_integrated", "loudness_true_peak", "loudness_range",
 	}
 	for i, c := range cols {
 		cols[i] = alias + "." + c
@@ -52,6 +56,7 @@ func ScanTrack(s interface {
 	var title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
 	var spotifyID, externalURL sql.NullString
 	var trackNo, discNo, year, durationSec sql.NullInt64
+	var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
 
 	err := s.Scan(
 		&t.ID,
@@ -59,6 +64,7 @@ func ScanTrack(s interface {
 		&trackNo, &discNo, &year, &genre,
 		&durationSec, &mediaKind, &mime,
 		&spotifyID, &externalURL,
+		&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
 	)
 	if err != nil {
 		return t, err
@@ -102,6 +108,15 @@ func ScanTrack(s interface {
 	}
 	if externalURL.Valid {
 		t.ExternalURL = externalURL.String
+	}
+	if loudnessIntegrated.Valid {
+		t.LoudnessIntegrated = loudnessIntegrated.Float64
+	}
+	if loudnessTruePeak.Valid {
+		t.LoudnessTruePeak = loudnessTruePeak.Float64
+	}
+	if loudnessRange.Valid {
+		t.LoudnessRange = loudnessRange.Float64
 	}
 
 	return t, nil

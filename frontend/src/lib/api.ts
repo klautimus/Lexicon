@@ -112,6 +112,13 @@ export const api = {
   deleteTrack: (trackId: number) =>
     j<void>(`/library/track/${trackId}`, { method: 'DELETE' }),
 
+  // Track upgrade (re-download with new bestaudio/opus pipeline)
+  upgradeTrack: (trackId: number) =>
+    j<{ job_id: string; query: string; status: string; message: string }>(`/library/upgrade`, {
+      method: 'POST',
+      body: JSON.stringify({ track_id: trackId }),
+    }),
+
   // Podcast feeds
   podcastFeeds: () => j<PodcastFeed[]>('/podcasts/feeds'),
   podcastSubscribe: (url: string) =>
@@ -128,6 +135,13 @@ export const api = {
     j<{ ok: boolean }>(`/podcasts/feeds/${feedId}/download`, { method: 'POST' }),
   podcastEpisodeTrack: (episodeId: number) =>
     j<{ track_id: number }>(`/podcasts/episodes/${episodeId}/track`),
+  podcastEpisodePosition: (episodeId: number) =>
+    j<{ position_sec: number; listened: boolean }>(`/podcasts/episodes/${episodeId}/position`),
+  savePodcastEpisodePosition: (episodeId: number, positionSec: number, completed: boolean) =>
+    j<{ ok: boolean }>(`/podcasts/episodes/${episodeId}/position`, {
+      method: 'POST',
+      body: JSON.stringify({ position_sec: positionSec, completed }),
+    }),
   podcastStatus: () => j<{ available: boolean; bin?: string }>('/podcasts/status'),
 
   // Spotify devices
@@ -176,6 +190,9 @@ export interface Track {
   spotify_id?: string | null;
   external_url?: string | null;
   position?: number;
+  loudness_integrated?: number | null;
+  loudness_true_peak?: number | null;
+  loudness_range?: number | null;
 }
 
 export interface TrackListResponse {
@@ -319,6 +336,8 @@ export interface PodcastEpisode {
   downloaded: boolean;
   file_path: string;
   download_error: string;
+  playback_position_sec: number;
+  listened: boolean;
 }
 
 export interface SpotifyDevice {

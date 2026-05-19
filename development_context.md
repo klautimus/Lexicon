@@ -2,7 +2,7 @@
 
 > **Purpose:** Zero-context onboarding for any AI agent resuming work on Lexicon.
 > **Path:** `C:\Users\kevin\CascadeProjects\lexicon`
-> **Version:** 3.2.0 (May 2026)
+> **Version:** 3.3.5 (May 2026)
 > **Last updated:** 2026-05-18
 
 ## What Is Lexicon?
@@ -137,6 +137,9 @@ All of these were fixed as of 2026-05-16 (v2.4.0) and should NOT be listed as ac
 - ✅ gofeed.Person SQL fix → Extract `.Name` string before passing to SQL (v2.8.3)
 - ✅ Poddl not bundled → Downloaded poddl.exe, added to tools/ and installer (v2.8.4)
 - ✅ Poddl download pipeline broken → Fixed: use audioURL instead of feedURL, set PODDL_BIN in .env, fix frontend polling (v2.9.0)
+- ✅ AI playlist creation race condition → Fixed: increased frontend retry budget (60×3s=3min), added explicit rescan trigger before search, added backend post-download track path lookup (v3.3.5)
+- ✅ Chat/playlist LLM not receiving Spotify data → Fixed: added `ClientSecret` to Spotify config for token refresh, increased chat timeout to 120s, added 45s sub-context for Spotify calls, added per-call 15s timeouts in `buildSpotifyProfile()`, added Spotify enrichment to playlist endpoint (v3.3.5)
+- ✅ Podcast playback position tracking → Fixed: added `playback_position_sec` and `listened` columns, new save/position endpoints, frontend progress bar and resume support (v3.3.5)
 
 ## Working on This Project
 

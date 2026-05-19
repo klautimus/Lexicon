@@ -107,7 +107,9 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 
 	// Enrich profile with Spotify top data if connected
 	if a.spotify != nil {
-		spotifyProfile := a.buildSpotifyProfile(ctx)
+		spCtx, spCancel := context.WithTimeout(ctx, 45*time.Second)
+		spotifyProfile := a.buildSpotifyProfile(spCtx)
+		spCancel()
 		if spotifyProfile != "" {
 			profile = profile + "\n" + spotifyProfile
 		}
@@ -150,6 +152,16 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
+	}
+
+	// Enrich profile with Spotify top data if connected
+	if a.spotify != nil {
+		spCtx, spCancel := context.WithTimeout(ctx, 45*time.Second)
+		spotifyProfile := a.buildSpotifyProfile(spCtx)
+		spCancel()
+		if spotifyProfile != "" {
+			profile = profile + "\n" + spotifyProfile
+		}
 	}
 
 	profileHash := hashProfile(profile)
@@ -195,7 +207,7 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt := fmt.Sprintf(`Given this user's listening profile, generate a cohesive playlist.
-Return ONLY valid JSON with this exact shape:
+Return ONLY valid JSON with this shape:
 {
   "name": "catchy playlist name",
   "description": "1-2 sentence vibe description",
@@ -204,11 +216,20 @@ Return ONLY valid JSON with this exact shape:
   ]
 }
 
+PROFILE LEGEND:
+- "Top artists/tracks (90d)" = what they've been playing from their local library
+- "Spotify Top Artists/Tracks (last 6 months)" = what they stream on Spotify — use this to understand their broader taste beyond local files
+- "User's Spotify Playlists" = playlists they've created — great source of thematic inspiration
+- "User's Spotify Library" = songs they've saved/liked on Spotify
+- "Followed Artists" = artists they actively follow on Spotify
+- "Recently played" = most recent local plays
+
 Rules:
 - Generate exactly %d tracks
 - Name should be creative and thematic (not generic like "My Playlist")
 - Mix of songs the user likely has and new discoveries
-- Be specific and personal — reference patterns from the profile
+- Be specific and personal — reference artists and patterns from the profile in your reasons
+- If Spotify data shows different taste than local library, weight Spotify more heavily (it reflects their broader listening)
 - Output ONLY valid JSON, no prose, no code fences.
 %s
 PROFILE:
@@ -260,13 +281,17 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// 120s timeout: buildProfile + buildSpotifyProfile (5 API calls) + DeepSeek call
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 	profile, _ := a.buildProfile(ctx)
 
 	// Enrich profile with Spotify top data if connected
 	if a.spotify != nil {
-		spotifyProfile := a.buildSpotifyProfile(ctx)
+		// Use a dedicated sub-context for Spotify to avoid starving the LLM call
+		spCtx, spCancel := context.WithTimeout(ctx, 45*time.Second)
+		spotifyProfile := a.buildSpotifyProfile(spCtx)
+		spCancel()
 		if spotifyProfile != "" {
 			profile = profile + "\n" + spotifyProfile
 		}
@@ -304,7 +329,7 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	system := fmt.Sprintf(`You are a music curator. ALWAYS respond with ONLY a single valid JSON object. No markdown, no prose outside the JSON, no code fences.
+	system := fmt.Sprintf(`You are a music curator with deep knowledge of the user's taste. ALWAYS respond with ONLY a single valid JSON object. No markdown, no prose outside the JSON, no code fences.
 
 If the user asks for a playlist, use this shape:
 {"message":"A short conversational reply","playlist":{"name":"Creative Playlist Name","description":"1-2 sentence vibe","tracks":[{"title":"...","artist":"...","reason":"..."}]}}
@@ -312,11 +337,20 @@ If the user asks for a playlist, use this shape:
 If the user asks a normal question (not about making a playlist), use this shape:
 {"message":"Your concise answer here."}
 
+PROFILE LEGEND:
+- "Top artists/tracks (90d)" = what they've been playing from their local library
+- "Spotify Top Artists/Tracks (last 6 months)" = what they stream on Spotify — use this to understand their broader taste beyond local files
+- "User's Spotify Playlists" = playlists they've created — great source of thematic inspiration
+- "User's Spotify Library" = songs they've saved/liked on Spotify
+- "Followed Artists" = artists they actively follow on Spotify
+- "Recently played" = most recent local plays
+
 Rules:
-- For playlist requests: generate exactly %d tracks, creative thematic name, reference patterns from the profile.
-- For normal questions: answer concisely in the "message" field.
+- For playlist requests: generate exactly %d tracks, creative thematic name, reference specific artists and patterns from the profile in your reasons.
+- For normal questions: answer concisely in the "message" field, referencing the user's taste profile when relevant.
 - ALWAYS include the "message" field.
 - NEVER output text outside the JSON object.
+- If Spotify data shows different taste than local library, weight Spotify more heavily (it reflects their broader listening).
 %s
 ---
 USER LISTENING PROFILE:
@@ -434,6 +468,7 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 
 // buildSpotifyProfile fetches the user's Spotify data to enrich the LLM profile.
 // Includes: top artists, top tracks, playlists, saved tracks, and followed artists.
+// Each API call has its own 15s timeout to avoid one slow call blocking others.
 func (a *API) buildSpotifyProfile(ctx context.Context) string {
 	if a.spotify == nil {
 		return ""
@@ -448,12 +483,31 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 
 	var b strings.Builder
 
+	// Helper: run a Spotify API call with a per-call timeout
+	call := func(fn func(context.Context) (string, error)) {
+		callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		result, err := fn(callCtx)
+		if err != nil {
+			log.Printf("[recommender] spotify: %v", err)
+			return
+		}
+		if result != "" {
+			fmt.Fprint(&b, result)
+		}
+	}
+
 	// 1. Fetch top artists from Spotify
-	topArtists, err := spotify.FetchTopArtists(ctx, accessToken, 20)
-	if err != nil {
-		log.Printf("[recommender] spotify top artists: %v", err)
-	} else if len(topArtists.Items) > 0 {
-		fmt.Fprintln(&b, "Spotify Top Artists (last 6 months):")
+	call(func(callCtx context.Context) (string, error) {
+		topArtists, err := spotify.FetchTopArtists(callCtx, accessToken, 20)
+		if err != nil {
+			return "", fmt.Errorf("top artists: %w", err)
+		}
+		if len(topArtists.Items) == 0 {
+			return "", nil
+		}
+		var sb strings.Builder
+		fmt.Fprintln(&sb, "Spotify Top Artists (last 6 months):")
 		for i, artist := range topArtists.Items {
 			if i >= 10 {
 				break
@@ -462,16 +516,22 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 			if len(artist.Genres) > 0 {
 				genreStr = fmt.Sprintf(" [%s]", strings.Join(artist.Genres[:min(3, len(artist.Genres))], ", "))
 			}
-			fmt.Fprintf(&b, "  - %s%s\n", artist.Name, genreStr)
+			fmt.Fprintf(&sb, "  - %s%s\n", artist.Name, genreStr)
 		}
-	}
+		return sb.String(), nil
+	})
 
 	// 2. Fetch top tracks from Spotify
-	topTracks, err := spotify.FetchTopTracks(ctx, accessToken, 20)
-	if err != nil {
-		log.Printf("[recommender] spotify top tracks: %v", err)
-	} else if len(topTracks.Items) > 0 {
-		fmt.Fprintln(&b, "Spotify Top Tracks (last 6 months):")
+	call(func(callCtx context.Context) (string, error) {
+		topTracks, err := spotify.FetchTopTracks(callCtx, accessToken, 20)
+		if err != nil {
+			return "", fmt.Errorf("top tracks: %w", err)
+		}
+		if len(topTracks.Items) == 0 {
+			return "", nil
+		}
+		var sb strings.Builder
+		fmt.Fprintln(&sb, "Spotify Top Tracks (last 6 months):")
 		for i, track := range topTracks.Items {
 			if i >= 10 {
 				break
@@ -480,16 +540,22 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 			for _, a := range track.Artists {
 				artists = append(artists, a.Name)
 			}
-			fmt.Fprintf(&b, "  - %s — %s\n", track.Name, strings.Join(artists, ", "))
+			fmt.Fprintf(&sb, "  - %s — %s\n", track.Name, strings.Join(artists, ", "))
 		}
-	}
+		return sb.String(), nil
+	})
 
 	// 3. Fetch user's playlists (names, descriptions, track counts)
-	playlists, err := spotify.FetchUserPlaylists(ctx, accessToken, 50)
-	if err != nil {
-		log.Printf("[recommender] spotify playlists: %v", err)
-	} else if len(playlists) > 0 {
-		fmt.Fprintln(&b, "User's Spotify Playlists:")
+	call(func(callCtx context.Context) (string, error) {
+		playlists, err := spotify.FetchUserPlaylists(callCtx, accessToken, 50)
+		if err != nil {
+			return "", fmt.Errorf("playlists: %w", err)
+		}
+		if len(playlists) == 0 {
+			return "", nil
+		}
+		var sb strings.Builder
+		fmt.Fprintln(&sb, "User's Spotify Playlists:")
 		for i, pl := range playlists {
 			if i >= 15 {
 				break
@@ -504,16 +570,22 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 			if pl.Description != "" {
 				desc = fmt.Sprintf(" — %s", truncate(pl.Description, 60))
 			}
-			fmt.Fprintf(&b, "  - %s%s [%d tracks]%s\n", pl.Name, visibility, pl.Tracks.Total, desc)
+			fmt.Fprintf(&sb, "  - %s%s [%d tracks]%s\n", pl.Name, visibility, pl.Tracks.Total, desc)
 		}
-	}
+		return sb.String(), nil
+	})
 
 	// 4. Fetch saved/liked tracks (sample of 50 most recent)
-	savedTracks, err := spotify.FetchSavedTracks(ctx, accessToken, 50)
-	if err != nil {
-		log.Printf("[recommender] spotify saved tracks: %v", err)
-	} else if len(savedTracks) > 0 {
-		fmt.Fprintf(&b, "User's Spotify Library: %d saved tracks (showing recent %d)\n", len(savedTracks), min(10, len(savedTracks)))
+	call(func(callCtx context.Context) (string, error) {
+		savedTracks, err := spotify.FetchSavedTracks(callCtx, accessToken, 50)
+		if err != nil {
+			return "", fmt.Errorf("saved tracks: %w", err)
+		}
+		if len(savedTracks) == 0 {
+			return "", nil
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "User's Spotify Library: %d saved tracks (showing recent %d)\n", len(savedTracks), min(10, len(savedTracks)))
 		for i, st := range savedTracks {
 			if i >= 10 {
 				break
@@ -522,16 +594,22 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 			for _, a := range st.Track.Artists {
 				artists = append(artists, a.Name)
 			}
-			fmt.Fprintf(&b, "  - %s — %s\n", st.Track.Name, strings.Join(artists, ", "))
+			fmt.Fprintf(&sb, "  - %s — %s\n", st.Track.Name, strings.Join(artists, ", "))
 		}
-	}
+		return sb.String(), nil
+	})
 
 	// 5. Fetch followed artists
-	followedArtists, err := spotify.FetchFollowedArtists(ctx, accessToken, 50)
-	if err != nil {
-		log.Printf("[recommender] spotify followed artists: %v", err)
-	} else if len(followedArtists) > 0 {
-		fmt.Fprintf(&b, "Followed Artists on Spotify (%d total):\n", len(followedArtists))
+	call(func(callCtx context.Context) (string, error) {
+		followedArtists, err := spotify.FetchFollowedArtists(callCtx, accessToken, 50)
+		if err != nil {
+			return "", fmt.Errorf("followed artists: %w", err)
+		}
+		if len(followedArtists) == 0 {
+			return "", nil
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "Followed Artists on Spotify (%d total):\n", len(followedArtists))
 		for i, artist := range followedArtists {
 			if i >= 10 {
 				break
@@ -540,9 +618,10 @@ func (a *API) buildSpotifyProfile(ctx context.Context) string {
 			if len(artist.Genres) > 0 {
 				genreStr = fmt.Sprintf(" [%s]", strings.Join(artist.Genres[:min(2, len(artist.Genres))], ", "))
 			}
-			fmt.Fprintf(&b, "  - %s%s\n", artist.Name, genreStr)
+			fmt.Fprintf(&sb, "  - %s%s\n", artist.Name, genreStr)
 		}
-	}
+		return sb.String(), nil
+	})
 
 	return b.String()
 }
@@ -564,6 +643,14 @@ func min(a, b int) int {
 func (a *API) callDeepSeek(ctx context.Context, profile string) (RecsPayload, error) {
 	prompt := `You are a music & podcast recommendation engine. Based on the user's listening profile below, recommend 8 songs and 4 podcasts they might enjoy.
 
+PROFILE LEGEND:
+- "Top artists/tracks (90d)" = what they've been playing from their local library
+- "Spotify Top Artists/Tracks (last 6 months)" = what they stream on Spotify — broader taste beyond local files
+- "User's Spotify Playlists" = playlists they've created
+- "User's Spotify Library" = songs they've saved/liked on Spotify
+- "Followed Artists" = artists they actively follow on Spotify
+- "Recently played" = most recent local plays
+
 ` + profile + `
 
 Respond with JSON in this exact format:
@@ -577,7 +664,8 @@ Respond with JSON in this exact format:
 Rules:
 - "library" = user has this in their collection
 - "discover" = new suggestion they don't own
-- Be specific — reference listening patterns from the profile
+- Be specific — reference artists and patterns from the profile in your reasons
+- If Spotify data shows different taste than local library, weight Spotify more heavily
 - Output ONLY valid JSON, no prose, no code fences.`
 
 	reply, err := a.deepseekChatWithRetry(ctx, []map[string]string{

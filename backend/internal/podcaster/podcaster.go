@@ -74,6 +74,8 @@ func (a *API) Mount(r chi.Router) {
 	r.Post("/api/podcasts/feeds/{id}/sync", a.syncFeed)
 	r.Post("/api/podcasts/episodes/{id}/download", a.downloadEpisode)
 	r.Post("/api/podcasts/feeds/{id}/download", a.downloadFeed)
+	r.Post("/api/podcasts/episodes/{id}/position", a.saveEpisodePosition)
+	r.Get("/api/podcasts/episodes/{id}/position", a.getEpisodePosition)
 	r.Get("/api/podcasts/status", a.status)
 	r.Get("/api/podcasts/episodes/{id}/track", a.episodeTrack)
 }
@@ -94,17 +96,19 @@ type FeedJSON struct {
 }
 
 type EpisodeJSON struct {
-	ID          int64  `json:"id"`
-	FeedID      int64  `json:"feed_id"`
-	GUID        string `json:"guid"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	PubDate     int64  `json:"pub_date"`
-	DurationSec int    `json:"duration_sec"`
-	AudioURL    string `json:"audio_url"`
-	Downloaded  bool   `json:"downloaded"`
-	FilePath    string `json:"file_path"`
-	DownloadError string `json:"download_error"`
+	ID                int64  `json:"id"`
+	FeedID            int64  `json:"feed_id"`
+	GUID              string `json:"guid"`
+	Title             string `json:"title"`
+	Description       string `json:"description"`
+	PubDate           int64  `json:"pub_date"`
+	DurationSec       int    `json:"duration_sec"`
+	AudioURL          string `json:"audio_url"`
+	Downloaded        bool   `json:"downloaded"`
+	FilePath          string `json:"file_path"`
+	DownloadError     string `json:"download_error"`
+	PlaybackPositionSec int  `json:"playback_position_sec"`
+	Listened          bool   `json:"listened"`
 }
 
 // ----- Helpers -----
@@ -225,6 +229,72 @@ func (a *API) episodeTrack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]interface{}{"track_id": trackID})
+}
+
+// ----- Playback position tracking -----
+
+type positionReq struct {
+	PositionSec int  `json:"position_sec"`
+	Completed   bool `json:"completed"`
+}
+
+// saveEpisodePosition saves the current playback position for a podcast episode.
+func (a *API) saveEpisodePosition(w http.ResponseWriter, r *http.Request) {
+	episodeID, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if episodeID <= 0 {
+		http.Error(w, "invalid id", 400)
+		return
+	}
+	var req positionReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", 400)
+		return
+	}
+
+	// Auto-mark as listened if completed or position > 90% of duration
+	listened := 0
+	if req.Completed {
+		listened = 1
+	} else {
+		var durationSec sql.NullInt64
+		err := a.db.QueryRowContext(r.Context(),
+			`SELECT duration_sec FROM podcast_episodes WHERE id=?`, episodeID).Scan(&durationSec)
+		if err == nil && durationSec.Valid && durationSec.Int64 > 0 {
+			if float64(req.PositionSec) >= float64(durationSec.Int64)*0.9 {
+				listened = 1
+			}
+		}
+	}
+
+	_, err := a.db.ExecContext(r.Context(),
+		`UPDATE podcast_episodes SET playback_position_sec=?, listened=? WHERE id=?`,
+		req.PositionSec, listened, episodeID)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// getEpisodePosition returns the saved playback position for a podcast episode.
+func (a *API) getEpisodePosition(w http.ResponseWriter, r *http.Request) {
+	episodeID, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if episodeID <= 0 {
+		http.Error(w, "invalid id", 400)
+		return
+	}
+	var positionSec int
+	var listened int
+	err := a.db.QueryRowContext(r.Context(),
+		`SELECT playback_position_sec, listened FROM podcast_episodes WHERE id=?`, episodeID).Scan(&positionSec, &listened)
+	if err != nil {
+		http.Error(w, "episode not found", 404)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"position_sec": positionSec,
+		"listened":     listened == 1,
+	})
 }
 
 type subscribeReq struct {
@@ -394,7 +464,7 @@ func (a *API) listEpisodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(),
-		`SELECT id, feed_id, guid, title, description, pub_date, duration_sec, audio_url, downloaded, file_path, download_error
+		`SELECT id, feed_id, guid, title, description, pub_date, duration_sec, audio_url, downloaded, file_path, download_error, playback_position_sec, listened
 		 FROM podcast_episodes WHERE feed_id=? ORDER BY pub_date DESC`, feedID)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -409,7 +479,9 @@ func (a *API) listEpisodes(w http.ResponseWriter, r *http.Request) {
 		var durationSec sql.NullInt64
 		var filePath sql.NullString
 		var downloadError sql.NullString
-		if err := rows.Scan(&e.ID, &e.FeedID, &e.GUID, &e.Title, &e.Description, &pubDate, &durationSec, &e.AudioURL, &e.Downloaded, &filePath, &downloadError); err != nil {
+		var playbackPositionSec sql.NullInt64
+		var listened int
+		if err := rows.Scan(&e.ID, &e.FeedID, &e.GUID, &e.Title, &e.Description, &pubDate, &durationSec, &e.AudioURL, &e.Downloaded, &filePath, &downloadError, &playbackPositionSec, &listened); err != nil {
 			continue
 		}
 		if pubDate.Valid {
@@ -424,6 +496,10 @@ func (a *API) listEpisodes(w http.ResponseWriter, r *http.Request) {
 		if downloadError.Valid {
 			e.DownloadError = downloadError.String
 		}
+		if playbackPositionSec.Valid {
+			e.PlaybackPositionSec = int(playbackPositionSec.Int64)
+		}
+		e.Listened = listened == 1
 		episodes = append(episodes, e)
 	}
 	writeJSON(w, episodes)

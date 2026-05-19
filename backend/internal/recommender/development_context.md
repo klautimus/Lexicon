@@ -1,8 +1,8 @@
 # recommender — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/recommender/recommender.go` (760 LOC)
-> **Last updated:** 2026-05-17
+> **File:** `backend/internal/recommender/recommender.go` (855 LOC)
+> **Last updated:** 2026-05-18
 
 ## Purpose
 
@@ -30,7 +30,7 @@ The `API` struct also holds:
 | `GET` | `/api/recommendations` | Latest cached recommendations |
 | `POST` | `/api/recommendations/refresh` | Generate new recommendations (DeepSeek, ~90s timeout) |
 | `POST` | `/api/recommendations/playlist` | Generate AI playlist (cached by profile hash, 1h TTL) |
-| `POST` | `/api/recommendations/chat` | Conversational chat about music taste |
+| `POST` | `/api/recommendations/chat` | Conversational chat about music taste (~120s timeout) |
 
 ## Data Types
 
@@ -65,13 +65,15 @@ Builds a compact natural-language summary from local DB:
 - Recently played (last 15)
 - Library snapshot (total tracks + artists)
 
-### buildSpotifyProfile() (v2.6)
+### buildSpotifyProfile() (v3.3.5)
 Fetches the user's Spotify data to enrich the LLM profile:
 - Top artists (last 6 months, with genres)
 - Top tracks (last 6 months)
 - User's playlists (names, descriptions, track counts, visibility)
 - Saved/liked tracks (sample of 50)
 - Followed artists (with genres)
+
+Each API call has its own 15s timeout to avoid one slow call blocking others. The caller passes a parent context (typically 45s for Spotify section), and each individual call gets its own sub-timeout.
 
 Returns empty string if Spotify not connected or token expired.
 
@@ -89,16 +91,18 @@ Returns empty string if Spotify not connected or token expired.
 - Returns error if retry also fails
 
 ### Playlist endpoint
-- Builds profile → optionally enriches with web search (latest album by top artist) → sends curator prompt → parses JSON → returns `PlaylistPayload`
+- Builds profile → enriches with Spotify (45s sub-context) → optionally enriches with web search (latest album by top artist) → sends curator prompt → parses JSON → returns `PlaylistPayload`
 - **Cached:** Uses profile hash + 1h TTL in `recommendations` table (type='playlist')
 - `force=true` query param bypasses cache
 
 ### Chat endpoint
 - Accepts `{"message": "..."}`
 - Uses `response_format: {type: "json_object"}` for structured output
+- **Spotify enrichment:** 45s sub-context for `buildSpotifyProfile()`
 - **Web search enrichment:** Detects album/artist queries via `websearch.DetectSearchQuery()`, searches for track listings, injects results into system prompt
 - Dual mode: `{reply: string}` for text, `{reply, playlist}` for playlist generation
 - Falls back to plain text response on JSON parse failure
+- **Timeout:** 120s (increased from 60s to accommodate Spotify + DeepSeek)
 
 ## Working Here
 

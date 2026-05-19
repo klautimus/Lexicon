@@ -1,8 +1,8 @@
 # config — Development Context
 
 > **Parent:** [backend](../development_context.md)
-| **File:** `backend/internal/config/config.go` (84 LOC)
-> **Last updated:** 2026-05-17
+> **File:** `backend/internal/config/config.go` (84 LOC)
+> **Last updated:** 2026-05-18
 
 ## Purpose
 
@@ -31,7 +31,7 @@ type Config struct {
     SpotdlFormat       string  // default "mp3"
     SpotdlAudio        string  // default "piped,youtube,soundcloud,bandcamp"
     YtdlpBin           string
-    YtdlpFormat        string  // default "mp3"
+    YtdlpFormat        string  // default "opus"
     FfmpegBin          string
     DownloadConcurrency int    // default 2
     WebSearchEnabled   bool   // default true

@@ -18,6 +18,10 @@ func (s *Streamer) Mount(r chi.Router) {
 }
 
 func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	var (
 		path string
@@ -29,7 +33,11 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		http.Error(w, "open", 500)
+		if os.IsNotExist(err) {
+			http.Error(w, "file not found", 404)
+		} else {
+			http.Error(w, "open", 500)
+		}
 		return
 	}
 	defer f.Close()
@@ -38,6 +46,10 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stat", 500)
 		return
 	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Range, Accept-Encoding")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range")
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "public, max-age=86400")

@@ -250,8 +250,18 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
                 }
 
                 // Sub-case B2: Actual download completed — find track in library with retries
+                // First, trigger an explicit rescan so the scanner indexes the new file
+                try {
+                  await api.scan();
+                } catch {
+                  /* ignore scan trigger failure */
+                }
+                // Wait for scanner to start processing
+                await new Promise((r) => setTimeout(r, 3000));
+
                 let found = false;
-                for (let attempt = 0; attempt < 15; attempt++) {
+                // Retry for up to 3 minutes (60 attempts × 3s) to handle slow scanner
+                for (let attempt = 0; attempt < 60; attempt++) {
                   const searches = [
                     `${track.artist} ${track.title}`,
                     track.title,
@@ -279,13 +289,14 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
                     }
                   }
                   if (found) break;
-                  await new Promise((r) => setTimeout(r, 2000));
+                  await new Promise((r) => setTimeout(r, 3000));
                 }
                 if (!found) {
                   setPlaylistTrackStatus((prev) => ({
                     ...prev,
                     [key]: "failed",
                   }));
+                  toast.error(`Could not find "${key}" in library after download`);
                 }
               } else if (
                 updated.status === "failed" ||

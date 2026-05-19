@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Search, Music, Download } from "lucide-react";
+import { Search, Music, Download, RefreshCw } from "lucide-react";
 import { api, Track, DownloadJob } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
 import TrackList from "../components/TrackList";
@@ -16,6 +16,8 @@ export default function MusicPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [query, setQuery] = useState("");
   const [downloading, setDownloading] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
+  const [upgradeProgress, setUpgradeProgress] = useState("");
 
   const hasMore = offset < total;
 
@@ -135,6 +137,33 @@ export default function MusicPage() {
     }
   }
 
+  async function handleBulkUpgrade() {
+    if (allTracks.length === 0) return;
+    const confirmed = window.confirm(
+      `Upgrade all ${allTracks.length} tracks to higher quality (Opus/bestaudio)?\n\nThis will re-download each track from YouTube using the new pipeline. Existing files will be replaced.`
+    );
+    if (!confirmed) return;
+    setUpgrading(true);
+    setUpgradeProgress("Starting...");
+    let done = 0;
+    let failed = 0;
+    for (const t of allTracks) {
+      try {
+        await api.upgradeTrack(t.id);
+        done++;
+        setUpgradeProgress(`Upgrading: ${done}/${allTracks.length} (${failed} failed)`);
+      } catch {
+        failed++;
+        setUpgradeProgress(`Upgrading: ${done}/${allTracks.length} (${failed} failed)`);
+      }
+      // Small delay to avoid overwhelming the download queue
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    setUpgrading(false);
+    setUpgradeProgress("");
+    toast.success(`Bulk upgrade complete: ${done} queued, ${failed} failed`);
+  }
+
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Music</h1>
@@ -161,9 +190,21 @@ export default function MusicPage() {
       )}
 
       {!q && !loading && (
-        <p className="text-xs text-muted">
-          {total} track{total !== 1 ? "s" : ""} in library
-        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-muted">
+            {total} track{total !== 1 ? "s" : ""} in library
+          </p>
+          {total > 0 && (
+            <button
+              onClick={handleBulkUpgrade}
+              disabled={upgrading}
+              className="flex items-center gap-1.5 px-3 py-1 text-xs bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30 disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={upgrading ? "animate-spin" : ""} />
+              {upgrading ? upgradeProgress || "Upgrading..." : "Upgrade All to Opus"}
+            </button>
+          )}
+        </div>
       )}
 
       {loading ? (

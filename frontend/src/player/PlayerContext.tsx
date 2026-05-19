@@ -46,12 +46,15 @@ interface PlayerCtx extends PlayerState {
   setVolume: (v: number) => void;
   toggleShuffle: () => void;
   toggleRepeat: () => void;
+  setPodcastEpisodeId: (episodeId: number | null) => void;
 }
 
 const Ctx = createContext<PlayerCtx | null>(null);
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const compressorRef = useRef<DynamicsCompressorNode | null>(null);
   const [state, setState] = useState<PlayerState>({
     current: null,
     queue: [],
@@ -74,6 +77,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const consecutiveErrorsRef = useRef<number>(0);
   const skipTimeoutRef = useRef<number | null>(null);
   const playSessionRef = useRef<number>(0);
+  const podcastEpisodeIdRef = useRef<number | null>(null);
+  const podcastSaveIntervalRef = useRef<number | null>(null);
   const toast = useToast();
   const wsRef = useRef<ReturnType<typeof getPlayerWebSocket> | null>(null);
   const isWsPlayerRef = useRef<boolean>(false);
@@ -152,6 +157,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const a = new Audio();
     a.preload = "auto";
+    a.crossOrigin = "anonymous";
+    // playsInline / webkit-playsinline — needed for iOS Safari inline playback
+    a.setAttribute("playsinline", "playsinline");
+    a.setAttribute("webkit-playsinline", "webkit-playsinline");
     audioRef.current = a;
     a.volume = state.volume;
     const onTime = () =>
@@ -205,6 +214,29 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.removeEventListener("error", onError);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ----- Web Audio API: Dynamics Compressor -----
+  // Must be initialized after user gesture (browser autoplay policy)
+  const initAudioPipeline = useCallback(() => {
+    const a = audioRef.current;
+    if (!a || audioCtxRef.current) return; // already initialized
+    try {
+      const ctx = new AudioContext();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaElementSource(a);
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = -24;
+      compressor.knee.value = 30;
+      compressor.ratio.value = 12;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+      compressorRef.current = compressor;
+      source.connect(compressor);
+      compressor.connect(ctx.destination);
+    } catch (e) {
+      console.warn("[player] Web Audio API init failed:", e);
+    }
   }, []);
 
   function flushLocalPlay(completed: boolean) {
@@ -327,6 +359,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const a = audioRef.current!;
     // Pause and reset before changing source to prevent ghost playback
     a.pause();
+    // Initialize Web Audio API compressor on first user interaction
+    initAudioPipeline();
     a.src = api.streamUrl(t.id);
     a.play()
       .then(() => {
@@ -335,6 +369,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         playStartRef.current = Math.floor(Date.now() / 1000);
         playSecondsRef.current = 0;
         consecutiveErrorsRef.current = 0;
+        // Volume normalization: adjust to -14 LUFS target
+        if (t.loudness_integrated != null) {
+          const targetLUFS = -14;
+          const gainDB = targetLUFS - t.loudness_integrated;
+          const gainLinear = Math.pow(10, gainDB / 20);
+          a.volume = Math.min(1.0, state.volume * gainLinear);
+        }
       })
       .catch((e: any) => {
         const msg = e?.message || "Audio playback failed";
@@ -364,12 +405,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return a;
   }
 
-  function play(tracks: Track[], startIndex = 0) {
+  async function play(tracks: Track[], startIndex = 0) {
     if (tracks.length === 0) return;
     // Clear any pending auto-skip from previous track
     clearSkipTimeout();
     // Reset consecutive errors for manual play
     consecutiveErrorsRef.current = 0;
+    // Clear podcast episode ID when playing non-podcast tracks
+    // (the caller sets it explicitly for podcast episodes)
+    if (podcastEpisodeIdRef.current !== null) {
+      await savePodcastPosition();
+      await setPodcastEpisodeId(null);
+    }
     originalQueueRef.current = [...tracks];
     const chosen = tracks[startIndex];
     if (shuffledRef.current && tracks.length > 1) {
@@ -509,9 +556,72 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setState((s) => ({ ...s, volume: v }));
   }
 
+  // ----- Podcast playback position tracking -----
+
+  const clearPodcastSaveInterval = useCallback(() => {
+    if (podcastSaveIntervalRef.current !== null) {
+      clearInterval(podcastSaveIntervalRef.current);
+      podcastSaveIntervalRef.current = null;
+    }
+  }, []);
+
+  const savePodcastPosition = useCallback(async () => {
+    if (podcastEpisodeIdRef.current === null) return;
+    const a = audioRef.current;
+    if (!a) return;
+    const pos = Math.floor(a.currentTime);
+    if (pos <= 0) return;
+    const completed = a.ended || (a.duration > 0 && a.currentTime >= a.duration - 1);
+    try {
+      await api.savePodcastEpisodePosition(podcastEpisodeIdRef.current, pos, completed);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setPodcastEpisodeId = useCallback(async (episodeId: number | null) => {
+    // Save position for previous episode before switching (await to ensure it completes)
+    if (podcastEpisodeIdRef.current !== null && podcastEpisodeIdRef.current !== episodeId) {
+      await savePodcastPosition();
+    }
+    clearPodcastSaveInterval();
+    podcastEpisodeIdRef.current = episodeId;
+    if (episodeId !== null) {
+      // Save position every 5 seconds during playback
+      podcastSaveIntervalRef.current = window.setInterval(() => {
+        savePodcastPosition();
+      }, 5000);
+    }
+  }, [savePodcastPosition, clearPodcastSaveInterval]);
+
+  // Save position on page unload
+  useEffect(() => {
+    const handleUnload = () => {
+      if (podcastEpisodeIdRef.current !== null) {
+        const a = audioRef.current;
+        if (a) {
+          const pos = Math.floor(a.currentTime);
+          if (pos > 0) {
+            // Use sendBeacon for reliable delivery on page unload
+            const data = JSON.stringify({ position_sec: pos, completed: a.ended });
+            navigator.sendBeacon(
+              `/api/podcasts/episodes/${podcastEpisodeIdRef.current}/position`,
+              new Blob([data], { type: 'application/json' })
+            );
+          }
+        }
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      clearPodcastSaveInterval();
+    };
+  }, [clearPodcastSaveInterval]);
+
   return (
     <Ctx.Provider
-      value={{ ...state, play, toggle, next, prev, seek, setVolume, toggleShuffle, toggleRepeat }}
+      value={{ ...state, play, toggle, next, prev, seek, setVolume, toggleShuffle, toggleRepeat, setPodcastEpisodeId }}
     >
       {children}
     </Ctx.Provider>

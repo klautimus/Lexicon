@@ -125,6 +125,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		var title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
 		var spotifyID, externalURL sql.NullString
 		var trackNo, discNo, year, durationSec sql.NullInt64
+		var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
 		var position int
 		err := rows.Scan(
 			&t.ID,
@@ -132,6 +133,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 			&trackNo, &discNo, &year, &genre,
 			&durationSec, &mediaKind, &mime,
 			&spotifyID, &externalURL,
+			&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
 			&position,
 		)
 		if err != nil {
@@ -151,6 +153,9 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		if mime.Valid { t.Mime = mime.String }
 		if spotifyID.Valid { t.SpotifyID = spotifyID.String }
 		if externalURL.Valid { t.ExternalURL = externalURL.String }
+		if loudnessIntegrated.Valid { t.LoudnessIntegrated = loudnessIntegrated.Float64 }
+		if loudnessTruePeak.Valid { t.LoudnessTruePeak = loudnessTruePeak.Float64 }
+		if loudnessRange.Valid { t.LoudnessRange = loudnessRange.Float64 }
 		p.Tracks = append(p.Tracks, PlaylistTrack{Track: t, Position: position})
 		p.TotalDuration += int(t.DurationSec)
 	}
@@ -159,6 +164,9 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.TrackCount = len(p.Tracks)
+	if p.Tracks == nil {
+		p.Tracks = []PlaylistTrack{}
+	}
 	writeJSON(w, p)
 }
 

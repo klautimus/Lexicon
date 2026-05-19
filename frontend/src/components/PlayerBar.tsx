@@ -15,10 +15,10 @@ export default function PlayerBar() {
   const t = p.current;
 
   return (
-    <div className="bg-panel border-t border-black/40 px-3 py-2 md:px-4 md:h-20 md:py-0 md:flex md:items-center md:gap-4 flex flex-col gap-1.5">
-      {/* ── Mobile: Row 1 ── */}
-      <div className="flex items-center gap-2 w-full">
-        {/* Track info — narrower on mobile */}
+    <div className="bg-panel border-t border-black/40 px-3 py-2 md:px-4 md:py-3 flex flex-col gap-1.5">
+      {/* ── Row 1: Track info + Desktop controls + Volume ── */}
+      <div className="flex items-center gap-3 w-full">
+        {/* Track info */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
           {t ? (
             <>
@@ -50,39 +50,8 @@ export default function PlayerBar() {
           )}
         </div>
 
-        {/* Play/Pause — always visible, larger touch target on mobile */}
-        <button
-          onClick={p.toggle}
-          disabled={!t}
-          className="md:hidden w-10 h-10 rounded-full bg-accent text-bg flex items-center justify-center hover:scale-105 transition disabled:opacity-30 flex-shrink-0"
-        >
-          {p.playing ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
-        </button>
-
-        {/* DevicePicker — always visible, never shrinks */}
-        <div className="flex-shrink-0">
-          <DevicePicker currentTrack={t} />
-        </div>
-      </div>
-
-      {/* ── Mobile: Row 2 — Progress bar ── */}
-      <div className="flex items-center gap-2 w-full md:hidden">
-        <span className="w-8 text-right text-[10px] text-muted">{fmt(p.position)}</span>
-        <input
-          type="range"
-          min={0}
-          max={p.duration || 0}
-          value={p.position}
-          onChange={(e) => p.seek(Number(e.target.value))}
-          className="flex-1 accent-accent"
-          disabled={!t}
-        />
-        <span className="w-8 text-[10px] text-muted">{fmt(p.duration)}</span>
-      </div>
-
-      {/* ── Desktop: Center controls ── */}
-      <div className="hidden md:flex flex-1 flex-col items-center gap-1">
-        <div className="flex items-center gap-3">
+        {/* Desktop: Playback controls */}
+        <div className="hidden md:flex items-center gap-3">
           <button
             onClick={p.toggleShuffle}
             disabled={!t}
@@ -119,33 +88,49 @@ export default function PlayerBar() {
             {p.repeatMode === "one" ? <Repeat1 size={18} /> : <Repeat size={18} />}
           </button>
         </div>
-        <div className="flex items-center gap-2 w-full max-w-xl text-xs text-muted">
-          <span className="w-10 text-right">{fmt(p.position)}</span>
+
+        {/* Desktop: Volume */}
+        <div className="hidden md:flex items-center gap-2 w-32">
+          <Volume2 size={14} className="text-muted" />
           <input
             type="range"
             min={0}
-            max={p.duration || 0}
-            value={p.position}
-            onChange={(e) => p.seek(Number(e.target.value))}
+            max={1}
+            step={0.01}
+            value={p.volume}
+            onChange={(e) => p.setVolume(Number(e.target.value))}
             className="flex-1 accent-accent"
-            disabled={!t}
           />
-          <span className="w-10">{fmt(p.duration)}</span>
+        </div>
+
+        {/* Mobile: Play/Pause */}
+        <button
+          onClick={p.toggle}
+          disabled={!t}
+          className="md:hidden w-10 h-10 rounded-full bg-accent text-bg flex items-center justify-center hover:scale-105 transition disabled:opacity-30 flex-shrink-0"
+        >
+          {p.playing ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
+        </button>
+
+        {/* DevicePicker */}
+        <div className="flex-shrink-0">
+          <DevicePicker currentTrack={t} />
         </div>
       </div>
 
-      {/* ── Desktop: Volume ── */}
-      <div className="hidden md:flex items-center gap-2 w-32">
-        <Volume2 size={14} className="text-muted" />
+      {/* ── Row 2: Progress bar (all screen sizes) ── */}
+      <div className="flex items-center gap-2 w-full">
+        <span className="w-8 text-right text-[10px] text-muted">{fmt(p.position)}</span>
         <input
           type="range"
           min={0}
-          max={1}
-          step={0.01}
-          value={p.volume}
-          onChange={(e) => p.setVolume(Number(e.target.value))}
+          max={p.duration || 0}
+          value={p.position}
+          onChange={(e) => p.seek(Number(e.target.value))}
           className="flex-1 accent-accent"
+          disabled={!t}
         />
+        <span className="w-8 text-[10px] text-muted">{fmt(p.duration)}</span>
       </div>
     </div>
   );

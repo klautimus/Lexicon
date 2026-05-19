@@ -54,7 +54,7 @@ func Load() Config {
 		SpotiflacFolderFmt: env("SPOTIFLAC_FOLDER_FORMAT", ""),
 		SpotdlAudio:        env("SPOTDL_AUDIO_PROVIDERS", "piped,youtube,soundcloud,bandcamp"),
 		YtdlpBin:           env("YTDLP_BIN", ""),
-		YtdlpFormat:        env("YTDLP_FORMAT", "mp3"),
+		YtdlpFormat:        env("YTDLP_FORMAT", "opus"),
 		FfmpegBin:          env("FFMPEG_BIN", ""),
 		PoddlBin:           env("PODDL_BIN", ""),
 		PodcastDir:         env("PODCAST_DIR", ""),

@@ -105,6 +105,33 @@ poddl.exe "https://example.com/feed.xml" -o C:\podcasts -r -t 1
 - ✅ **`doDownloadFeed` errors invisible** — bulk feed download errors are now written to both the unified job log and `podcast_feeds.last_error`.
 - ✅ **Frontend polling timed out at 2 minutes** — bumped to 30 minutes (3s × 600 attempts) and added `download_error` detection so failed downloads finish cleanly instead of waiting for timeout.
 
+## Phase 7: Playback Position Tracking (v3.3.5)
+
+### Problem
+Podcast episodes had no playback position tracking. Users couldn't resume from where they left off, and there was no way to see which episodes had been partially or fully listened to.
+
+### Changes Made
+
+#### DB (`db.go`)
+- Added `playback_position_sec INTEGER NOT NULL DEFAULT 0` to `podcast_episodes`
+- Added `listened INTEGER NOT NULL DEFAULT 0` to `podcast_episodes`
+- Both columns have idempotent migrations
+
+#### Backend (`podcaster.go`)
+- `EpisodeJSON` type: added `PlaybackPositionSec` and `Listened` fields
+- `listEpisodes`: SELECT now includes `playback_position_sec` and `listened`
+- New endpoint `POST /api/podcasts/episodes/{id}/position` — saves playback position; auto-marks as listened if completed or position > 90% of duration
+- New endpoint `GET /api/podcasts/episodes/{id}/position` — returns saved position and listened state
+
+#### Frontend (`PlayerContext.tsx`, `PodcastsPage.tsx`, `api.ts`)
+- `PlayerCtx` interface: added `setPodcastEpisodeId(episodeId)` method
+- Player tracks current podcast episode ID and saves position every 5 seconds
+- Position saved on page unload via `sendBeacon`
+- Position saved when switching tracks or playing non-podcast content
+- `PodcastsPage`: shows progress bar on partially-listened episodes, "✓ Listened" badge, "Resume from MM:SS" tooltip
+- `handlePlayEpisode`: accepts optional `startPositionSec` parameter and seeks after loading
+- `api.ts`: added `podcastEpisodePosition()`, `savePodcastEpisodePosition()`, and `PodcastEpisode` type updated with new fields
+
 ## Working Here
 
 - Adding a new feed field: update `podcast_feeds` table in `db.go`, update `subscribe()` and `doSyncFeed()`
