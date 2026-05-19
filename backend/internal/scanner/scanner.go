@@ -17,10 +17,16 @@ import (
 )
 
 type Scanner struct {
-	db *sql.DB
+	db        *sql.DB
+	loudnessSem chan struct{} // semaphore limiting concurrent ffmpeg loudness measurements
 }
 
-func New(db *sql.DB) *Scanner { return &Scanner{db: db} }
+func New(db *sql.DB) *Scanner {
+	return &Scanner{
+		db:          db,
+		loudnessSem: make(chan struct{}, 8), // max 8 concurrent ffmpeg loudness measurements
+	}
+}
 
 // loudnessResult holds parsed output from ffmpeg's loudnorm filter.
 type loudnessResult struct {
@@ -153,22 +159,27 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 
 	// Insert/update the track in the DB first (fast path — no blocking ffmpeg call)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tracks(path,title,artist,album_artist,album,track_no,disc_no,year,genre,mime,size_bytes,media_kind,mtime,loudness_integrated,loudness_true_peak,loudness_range)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO tracks(path,title,artist,album_artist,album,track_no,disc_no,year,genre,mime,size_bytes,cover_path,added_at,media_kind,mtime,loudness_integrated,loudness_true_peak,loudness_range)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(path) DO UPDATE SET
 			title=excluded.title, artist=excluded.artist, album_artist=excluded.album_artist,
 			album=excluded.album, track_no=excluded.track_no, disc_no=excluded.disc_no,
 			year=excluded.year, genre=excluded.genre, mime=excluded.mime,
-			size_bytes=excluded.size_bytes, media_kind=excluded.media_kind, mtime=excluded.mtime,
+			size_bytes=excluded.size_bytes, cover_path=excluded.cover_path, media_kind=excluded.media_kind, mtime=excluded.mtime,
 			loudness_integrated=excluded.loudness_integrated, loudness_true_peak=excluded.loudness_true_peak, loudness_range=excluded.loudness_range
-	`, path, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime, info.Size(), kind, mtime, 0.0, 0.0, 0.0)
+	`, path, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime, info.Size(), "", 0, kind, mtime, 0.0, 0.0, 0.0)
 	if err != nil {
 		return err
 	}
 
 	// Measure loudness asynchronously so it doesn't block the scan pipeline.
 	// The result is written back to the DB when ready.
+	// A semaphore (loudnessSem) limits concurrent ffmpeg processes to prevent
+	// resource exhaustion on large libraries.
 	go func() {
+		s.loudnessSem <- struct{}{}        // acquire
+		defer func() { <-s.loudnessSem }() // release
+
 		l := measureLoudness(context.Background(), path)
 		if l.InputI != 0 {
 			_, err := s.db.ExecContext(context.Background(),
