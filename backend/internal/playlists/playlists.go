@@ -117,7 +117,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT `+models.TrackCols+`, i.position
+		SELECT `+models.TrackColsAliased("tracks")+`, i.position
 		FROM playlist_items i
 		JOIN tracks ON tracks.id = i.track_id
 		WHERE i.playlist_id = ?
@@ -219,9 +219,18 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	_, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=?`, id)
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=?`, id)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if rows == 0 {
+		http.Error(w, "playlist not found", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
