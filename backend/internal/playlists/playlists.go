@@ -67,7 +67,10 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	out := []Playlist{}
 	for rows.Next() {
 		var p Playlist
-		rows.Scan(&p.ID, &p.Name, &p.TrackCount, &p.TotalDuration, &p.CreatedAt)
+		if err := rows.Scan(&p.ID, &p.Name, &p.TrackCount, &p.TotalDuration, &p.CreatedAt); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -89,6 +92,10 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		http.Error(w, "name is required", 400)
+		return
+	}
+	if len(req.Name) > 256 {
+		http.Error(w, "name must be 256 characters or fewer", 400)
 		return
 	}
 	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name) VALUES (?)`, req.Name)
@@ -122,24 +129,28 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	for rows.Next() {
 		var t models.Track
-		var title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
+		var path, title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
 		var spotifyID, externalURL sql.NullString
 		var trackNo, discNo, year, durationSec sql.NullInt64
+		var sizeBytes, addedAt, mtime sql.NullInt64
+		var coverPath sql.NullString
 		var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
 		var position int
 		err := rows.Scan(
 			&t.ID,
-			&title, &artist, &albumArtist, &album,
+			&path, &title, &artist, &albumArtist, &album,
 			&trackNo, &discNo, &year, &genre,
 			&durationSec, &mediaKind, &mime,
-			&spotifyID, &externalURL,
+			&sizeBytes, &coverPath, &addedAt, &mtime,
 			&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
+			&spotifyID, &externalURL,
 			&position,
 		)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		if path.Valid { t.Path = path.String }
 		if title.Valid { t.Title = title.String }
 		if artist.Valid { t.Artist = artist.String }
 		if albumArtist.Valid { t.AlbumArtist = albumArtist.String }
@@ -151,11 +162,15 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		if durationSec.Valid { t.DurationSec = int(durationSec.Int64) }
 		if mediaKind.Valid { t.MediaKind = mediaKind.String }
 		if mime.Valid { t.Mime = mime.String }
-		if spotifyID.Valid { t.SpotifyID = spotifyID.String }
-		if externalURL.Valid { t.ExternalURL = externalURL.String }
+		if sizeBytes.Valid { t.SizeBytes = sizeBytes.Int64 }
+		if coverPath.Valid { t.CoverPath = coverPath.String }
+		if addedAt.Valid { t.AddedAt = addedAt.Int64 }
+		if mtime.Valid { t.Mtime = mtime.Int64 }
 		if loudnessIntegrated.Valid { t.LoudnessIntegrated = loudnessIntegrated.Float64 }
 		if loudnessTruePeak.Valid { t.LoudnessTruePeak = loudnessTruePeak.Float64 }
 		if loudnessRange.Valid { t.LoudnessRange = loudnessRange.Float64 }
+		if spotifyID.Valid { t.SpotifyID = spotifyID.String }
+		if externalURL.Valid { t.ExternalURL = externalURL.String }
 		p.Tracks = append(p.Tracks, PlaylistTrack{Track: t, Position: position})
 		p.TotalDuration += int(t.DurationSec)
 	}
@@ -185,9 +200,18 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", 400)
 		return
 	}
-	_, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=? WHERE id=?`, req.Name, id)
+	res, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=? WHERE id=?`, req.Name, id)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
+		return
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if rows == 0 {
+		http.Error(w, "playlist not found", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
