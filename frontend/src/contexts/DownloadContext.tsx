@@ -156,7 +156,8 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
               return next;
             });
           }
-        } catch {
+        } catch (e) {
+          console.error(`[DownloadContext] trackDownload poll failed for "${name}":`, e);
           window.clearInterval(interval);
           delete pollRef.current[job.id];
           toast.error(`Lost connection tracking download`);
@@ -180,7 +181,8 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
       try {
         const job = await api.downloadSearch(name);
         trackDownload(job, name);
-      } catch {
+      } catch (e) {
+        console.error(`[DownloadContext] downloadItem failed for "${name}":`, e);
         toast.error("Failed to start download");
         setDownloadingIds((prev) => {
           const next = new Set(prev);
@@ -329,7 +331,8 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
             }
           }, 2000);
           pollRef.current[job.id] = interval;
-        } catch {
+        } catch (e) {
+          console.error(`[DownloadContext] createAiPlaylist track "${key}" failed:`, e);
           setPlaylistTrackStatus((prev) => ({ ...prev, [key]: "failed" }));
         }
       }

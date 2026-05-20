@@ -207,16 +207,11 @@ func (a *API) Shutdown() {
 // cancelled (server shutting down). Pass this to run/runSearch so that
 // in-flight downloads are promptly cancelled on shutdown.
 func (a *API) jobContext(reqCtx context.Context) context.Context {
-	ctx, cancel := context.WithCancel(a.shutdownCtx)
-	// Also cancel when the request context is cancelled (client disconnect).
-	go func() {
-		select {
-		case <-reqCtx.Done():
-		case <-a.shutdownCtx.Done():
-		}
-		cancel()
-	}()
-	return ctx
+	// Downloads run in fire-and-forget goroutines that outlive the HTTP request.
+	// Use only the shutdown context so downloads aren't killed when the handler returns.
+	// The reqCtx parameter is kept for API compatibility but is intentionally not used
+	// to avoid canceling downloads on normal request completion.
+	return a.shutdownCtx
 }
 
 // recoverJobs runs at startup to clean up stale running jobs from a
@@ -328,6 +323,7 @@ type enqueueReq struct {
 
 func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 	if !a.configured() {
+		log.Printf("[downloader] enqueue: not configured (bin=%q output=%q)", a.cfg.Bin, a.cfg.Output)
 		http.Error(w, "SpotiFLAC not configured. Set SPOTIFLAC_BIN and SPOTIFLAC_OUTPUT (or MEDIA_ROOTS) in backend/.env.", 400)
 		return
 	}
@@ -443,6 +439,7 @@ func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, error)
 
 func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 	if a.cfg.YtdlpBin == "" {
+		log.Printf("[downloader] searchEnqueue: YtdlpBin not configured")
 		http.Error(w, "yt-dlp not configured. Set YTDLP_BIN in backend/.env.", 400)
 		return
 	}
@@ -458,11 +455,13 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "query is required", 400)
 		return
 	}
+	log.Printf("[downloader] searchEnqueue: query=%q ytdlp_bin=%q output=%q", query, a.cfg.YtdlpBin, a.cfg.Output)
 
 	// Check library first to avoid re-downloading existing tracks
 	if a.db != nil {
 		trackID, err := a.findLibraryTrack(r.Context(), query)
 		if err == nil && trackID > 0 {
+			log.Printf("[downloader] searchEnqueue: query=%q resolved to existing track %d", query, trackID)
 			job := &Job{
 				ID:         uuid.NewString(),
 				URL:        query,
@@ -719,6 +718,8 @@ func (a *API) run(job *Job, ctx context.Context) {
 		return
 	}
 	a.mu.Unlock()
+
+	log.Printf("[downloader] run: starting job=%s url=%q tool=spotiflac", job.ID, job.URL)
 
 	a.mu.Lock()
 	job.Status = StatusRunning
@@ -1033,49 +1034,55 @@ func (a *API) runSearch(job *Job, ctx context.Context) {
 	}
 
 	if err != nil {
+		log.Printf("[downloader] runSearch: yt-dlp failed for query=%q job=%s: %v", job.URL, job.ID, err)
 		a.finish(job, StatusFailed, fmt.Sprintf("yt-dlp failed: %s", err.Error()))
 		return
 	}
 
 	// Validate downloaded file
 	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
-	if dlFile != "" {
-		if verr := a.verifyDownloadedFile(ctx, dlFile); verr != nil {
-			a.appendLog(job, fmt.Sprintf("[verify] file invalid: %s", verr.Error()))
-			a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
-			retrySearch := "ytsearch2:" + strings.TrimPrefix(job.URL, "ytsearch1:")
-			retryOutputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
-			retryArgs := []string{
-				retrySearch,
-				"-f", "bestaudio/best",
-				"--no-playlist", "--add-metadata",
-				"--embed-thumbnail", "--convert-thumbnails", "jpg", "--newline", "--no-warnings",
-				"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
-				"--extractor-args", "youtube:player_client=android",
-				"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
-			}
-			if a.cfg.FfmpegBin != "" {
-				retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
-			}
-			retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, ctx)
-			if retryErr != nil {
-				a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
+	if dlFile == "" {
+		log.Printf("[downloader] runSearch: no downloaded file found for query=%q job=%s output=%q", job.URL, job.ID, a.cfg.Output)
+		a.appendLog(job, "[verify] no audio file found in output directory after download")
+		a.finish(job, StatusFailed, "no audio file found in output directory")
+		return
+	}
+	log.Printf("[downloader] runSearch: downloaded file for query=%q job=%s: %s", job.URL, job.ID, dlFile)
+	if verr := a.verifyDownloadedFile(ctx, dlFile); verr != nil {
+		a.appendLog(job, fmt.Sprintf("[verify] file invalid: %s", verr.Error()))
+		a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
+		retrySearch := "ytsearch2:" + strings.TrimPrefix(job.URL, "ytsearch1:")
+		retryOutputDir := strings.ReplaceAll(a.cfg.Output, "\\", "/")
+		retryArgs := []string{
+			retrySearch,
+			"-f", "bestaudio/best",
+			"--no-playlist", "--add-metadata",
+			"--embed-thumbnail", "--convert-thumbnails", "jpg", "--newline", "--no-warnings",
+			"--abort-on-error", "--retries", "3", "--fragment-retries", "10",
+			"--extractor-args", "youtube:player_client=android",
+			"-o", retryOutputDir+"/%(artist)s - %(title)s.%(ext)s",
+		}
+		if a.cfg.FfmpegBin != "" {
+			retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
+		}
+		retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, ctx)
+		if retryErr != nil {
+			log.Printf("[downloader] runSearch: retry also failed for query=%q job=%s: %v", job.URL, job.ID, retryErr)
+			a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
+			return
+		}
+		retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+		if retryFile != "" {
+			if verr := a.verifyDownloadedFile(ctx, retryFile); verr != nil {
+				log.Printf("[downloader] runSearch: retry file also invalid for query=%q job=%s: %v", job.URL, job.ID, verr)
+				a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
 				return
-			}
-			retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
-			if retryFile != "" {
-				if verr := a.verifyDownloadedFile(ctx, retryFile); verr != nil {
-					a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
-					return
-				}
 			}
 		}
 	}
 
+	log.Printf("[downloader] runSearch: SUCCESS query=%q job=%s file=%s", job.URL, job.ID, dlFile)
 	a.finish(job, StatusSucceeded, "")
-	if a.rescan != nil {
-		go a.rescan()
-	}
 
 	// Try to resolve the downloaded file to a track ID so the frontend
 	// doesn't have to race with the scanner. Poll the DB for up to 2 minutes
@@ -1118,18 +1125,22 @@ func (a *API) runProcess(job *Job, logPrefix, bin string, args []string, ctx con
 	ctx, cancel := context.WithTimeout(ctx, processTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
+	log.Printf("[downloader] runProcess: job=%s tool=%s bin=%q args=%q", job.ID, logPrefix, bin, args)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		log.Printf("[downloader] runProcess: job=%s tool=%s stdout pipe error: %v", job.ID, logPrefix, err)
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		log.Printf("[downloader] runProcess: job=%s tool=%s stderr pipe error: %v", job.ID, logPrefix, err)
 		return err
 	}
 	a.mu.Lock()
 	job.cmd = cmd
 	a.mu.Unlock()
 	if err := cmd.Start(); err != nil {
+		log.Printf("[downloader] runProcess: job=%s tool=%s start error: %v", job.ID, logPrefix, err)
 		return fmt.Errorf("failed to start: %w", err)
 	}
 
