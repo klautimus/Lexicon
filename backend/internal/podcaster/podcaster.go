@@ -92,21 +92,18 @@ func (a *API) Shutdown() {
 	a.shutdownCancel()
 }
 
-// jobContext returns a context that is cancelled when either the request
-// context is cancelled (client disconnect) or the shutdown context is
-// cancelled (server shutting down). Pass this to doSyncFeed /
-// doDownloadEpisode / doDownloadFeed so that in-flight work is promptly
-// cancelled on shutdown.
+// jobContext returns the shutdown context for fire-and-forget goroutines.
+// Downloads and feed syncs outlive the HTTP request, so using the request
+// context would cancel them when the handler returns. Only the shutdown
+// context is used so they run to completion. The reqCtx parameter is kept
+// for API compatibility but is intentionally not used.
+// Pass this to doSyncFeed / doDownloadEpisode / doDownloadFeed.
 func (a *API) jobContext(reqCtx context.Context) context.Context {
-	ctx, cancel := context.WithCancel(a.shutdownCtx)
-	go func() {
-		select {
-		case <-reqCtx.Done():
-		case <-a.shutdownCtx.Done():
-		}
-		cancel()
-	}()
-	return ctx
+	// Downloads and feed syncs run in fire-and-forget goroutines that outlive
+	// the HTTP request. Use only the shutdown context so they aren't killed
+	// when the handler returns. The reqCtx parameter is kept for API
+	// compatibility but is intentionally not used.
+	return a.shutdownCtx
 }
 
 // ----- Types returned to frontend -----
