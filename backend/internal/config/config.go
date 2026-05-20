@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -34,7 +35,7 @@ type Config struct {
 	PodcastDir         string
 }
 
-func Load() Config {
+func Load() (Config, error) {
 	cfg := Config{
 		Port:               env("PORT", "8787"),
 		DBPath:             env("DB_PATH", "./data/lexicon.db"),
@@ -72,7 +73,21 @@ func Load() Config {
 		cfg.DownloadConcurrency = 2
 	}
 
-	return cfg
+	// Validate critical config values
+	if cfg.Port == "" {
+		return Config{}, fmt.Errorf("PORT cannot be empty")
+	}
+	if p, err := strconv.Atoi(cfg.Port); err != nil || p <= 0 || p > 65535 {
+		return Config{}, fmt.Errorf("PORT must be a valid port number (1-65535), got: %s", cfg.Port)
+	}
+	if cfg.DBPath == "" {
+		return Config{}, fmt.Errorf("DB_PATH cannot be empty")
+	}
+	if cfg.DeepSeekBaseURL == "" {
+		return Config{}, fmt.Errorf("DEEPSEEK_BASE_URL cannot be empty")
+	}
+
+	return cfg, nil
 }
 
 func env(key, def string) string {

@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 )
 
@@ -24,17 +25,27 @@ type Track struct {
 	CoverPath         string  `json:"cover_path,omitempty"`
 	AddedAt           int64   `json:"added_at"`
 	Mtime             int64   `json:"mtime"`
+	// Loudness fields use omitempty: 0.0 values are excluded from JSON.
+	// This is correct when the DB value is NULL (not yet measured), but
+	// technically ambiguous for true-zero measurements (~0 LUFS, rare in practice).
+	// See BUG-LOGIC-21 in audit-fix-plan-2026-05-20.md.
 	LoudnessIntegrated float64 `json:"loudness_integrated,omitempty"`
 	LoudnessTruePeak  float64 `json:"loudness_true_peak,omitempty"`
 	LoudnessRange     float64 `json:"loudness_range,omitempty"`
 	SpotifyID         string  `json:"spotify_id,omitempty"`
 	ExternalURL       string  `json:"external_url,omitempty"`
+	AppleID           string  `json:"apple_id,omitempty"`
 }
 
 // TrackCols matches the actual tracks table schema exactly.
 // Column order must match ScanTrack's Scan argument order.
 // Uses raw column names — NULLs are handled by sql.NullString in ScanTrack.
-const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url`
+const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url, apple_id`
+
+// ExpectedTrackCols is the exact number of columns in TrackCols.
+// Must match the dest argument count in ScanTrack and the columns in
+// TrackColsAliased. Edit all three when adding or removing columns.
+const ExpectedTrackCols = 23
 
 // TrackColsAliased returns TrackCols with a table prefix for JOIN queries
 // where column names might be ambiguous (e.g., tracks_fts has title, artist, etc.).
@@ -45,7 +56,7 @@ func TrackColsAliased(alias string) string {
 		"duration_sec", "media_kind", "mime",
 		"size_bytes", "cover_path", "added_at", "mtime",
 		"loudness_integrated", "loudness_true_peak", "loudness_range",
-		"spotify_id", "external_url",
+		"spotify_id", "external_url", "apple_id",
 	}
 	for i, c := range cols {
 		cols[i] = alias + "." + c
@@ -60,21 +71,27 @@ func ScanTrack(s interface {
 }) (Track, error) {
 	var t Track
 	var path, title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
-	var spotifyID, externalURL sql.NullString
+	var spotifyID, externalURL, appleID sql.NullString
 	var trackNo, discNo, year, durationSec sql.NullInt64
 	var sizeBytes, addedAt, mtime sql.NullInt64
 	var coverPath sql.NullString
 	var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
 
-	err := s.Scan(
+	dests := []interface{}{
 		&t.ID,
 		&path, &title, &artist, &albumArtist, &album,
 		&trackNo, &discNo, &year, &genre,
 		&durationSec, &mediaKind, &mime,
 		&sizeBytes, &coverPath, &addedAt, &mtime,
 		&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
-		&spotifyID, &externalURL,
-	)
+		&spotifyID, &externalURL, &appleID,
+	}
+
+	if len(dests) != ExpectedTrackCols {
+		return t, fmt.Errorf("ScanTrack: dest count %d != ExpectedTrackCols %d — update ScanTrack when columns change", len(dests), ExpectedTrackCols)
+	}
+
+	err := s.Scan(dests...)
 	if err != nil {
 		return t, err
 	}
@@ -141,6 +158,9 @@ func ScanTrack(s interface {
 	}
 	if externalURL.Valid {
 		t.ExternalURL = externalURL.String
+	}
+	if appleID.Valid {
+		t.AppleID = appleID.String
 	}
 
 	return t, nil

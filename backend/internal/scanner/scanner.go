@@ -93,7 +93,8 @@ var audioExts = map[string]string{
 func (s *Scanner) ScanRoot(ctx context.Context, root string) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // skip errors
+			log.Printf("[scanner] walk error at %s: %v", path, err)
+			return nil // skip errors but log them
 		}
 		if d.IsDir() {
 			return nil
@@ -121,7 +122,9 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 	}
 
 	var existingMtime sql.NullInt64
-	_ = s.db.QueryRowContext(ctx, "SELECT mtime FROM tracks WHERE path=?", path).Scan(&existingMtime)
+	if err := s.db.QueryRowContext(ctx, "SELECT mtime FROM tracks WHERE path=?", path).Scan(&existingMtime); err != nil && err != sql.ErrNoRows {
+		log.Printf("[scanner] failed to query existing mtime for %s: %v", path, err)
+	}
 	if existingMtime.Valid && existingMtime.Int64 == mtime {
 		return nil // up-to-date
 	}

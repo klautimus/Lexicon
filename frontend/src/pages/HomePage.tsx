@@ -7,6 +7,8 @@ export default function HomePage() {
   const { showHelp } = useHelp();
   const [stats, setStats] = useState<Stats | null>(null);
   const [recent, setRecent] = useState<RecentPlay[]>([]);
+  const [statsError, setStatsError] = useState(false);
+  const [recentError, setRecentError] = useState(false);
   const [showQr, setShowQr] = useState(false);
   const [localUrl, setLocalUrl] = useState("");
   const [networkInfo, setNetworkInfo] = useState<{local_ip: string; all_ips: string[]; private_ips: string[]} | null>(null);
@@ -152,12 +154,18 @@ export default function HomePage() {
             <HelpCircle size={14} />
           </button>
         </div>
+        {statsError ? (
+          <div className="bg-panel rounded-lg p-4 border border-panel2 text-center">
+            <p className="text-muted text-sm">Failed to load stats. <button onClick={() => { setStatsError(false); api.stats().then(setStats).catch(() => setStatsError(true)); }} className="text-accent hover:underline">Retry</button></p>
+          </div>
+        ) : (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Stat label="Tracks" value={stats?.tracks ?? "—"} />
           <Stat label="Albums" value={stats?.albums ?? "—"} />
           <Stat label="Artists" value={stats?.artists ?? "—"} />
           <Stat label="Podcasts" value={stats?.podcasts ?? "—"} />
         </div>
+        )}
       </div>
 
       <div>
@@ -171,12 +179,16 @@ export default function HomePage() {
             <HelpCircle size={14} />
           </button>
         </div>
-        {recent.length === 0 ? (
+        {recent.length === 0 && !recentError ? (
           <div className="bg-panel rounded-lg p-6 border border-panel2 text-center">
             <p className="text-muted text-sm">
               No plays yet — head to <strong>Music</strong> and play something to start
               building your taste profile.
             </p>
+          </div>
+        ) : recentError ? (
+          <div className="bg-panel rounded-lg p-4 border border-panel2 text-center">
+            <p className="text-muted text-sm">Failed to load recent plays. <button onClick={() => { setRecentError(false); api.recent().then(setRecent).catch(() => setRecentError(true)); }} className="text-accent hover:underline">Retry</button></p>
           </div>
         ) : (
           <ul className="divide-y divide-panel2 rounded-lg border border-panel2 overflow-hidden">

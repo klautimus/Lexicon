@@ -1,7 +1,7 @@
 # backend/internal — Package Overview
 
 > **Parent:** [backend development context](../development_context.md)
-> **Last updated:** 2026-05-17
+> **Last updated:** 2026-05-20
 
 ## Architecture Pattern
 

@@ -56,7 +56,10 @@ func main() {
 		log.Printf("[lexicon] WARNING: LEXICON_API_KEY is not set — all endpoints are unauthenticated")
 	}
 
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config validation: %v", err)
+	}
 	if cfg.SpotifyFrontendURL == "" {
 		cfg.SpotifyFrontendURL = "http://127.0.0.1:" + cfg.Port
 	}

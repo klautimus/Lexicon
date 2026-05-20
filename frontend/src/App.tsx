@@ -92,7 +92,7 @@ function DesktopLayout() {
             <span className="text-lg font-semibold tracking-wide">Lexicon</span>
           </div>
         </div>
-        <nav className="flex-1 p-2 space-y-1">
+        <nav className="flex-1 p-2 space-y-1" aria-label="Main navigation">
           {navItems.map((item) => (
             <NavItem key={item.to} item={item} />
           ))}

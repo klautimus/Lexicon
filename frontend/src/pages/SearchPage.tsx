@@ -12,6 +12,7 @@ export default function SearchPage() {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<Track[]>([]);
   const [searched, setSearched] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
@@ -24,8 +25,15 @@ export default function SearchPage() {
     e.preventDefault();
     if (!q.trim()) return;
     setSearched(true);
-    const r = await api.search(q.trim());
-    setResults(r);
+    setLoading(true);
+    try {
+      const r = await api.search(q.trim());
+      setResults(r);
+    } catch {
+      toast.error("Search failed");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function trackDownload(job: DownloadJob, name: string) {
@@ -104,10 +112,16 @@ export default function SearchPage() {
           placeholder="Search title, artist, album, genre…"
           className="flex-1 bg-panel border border-panel2 rounded-md px-3 py-2 outline-none focus:border-accent"
         />
-        <button className="px-4 py-2 bg-accent text-bg rounded-md font-medium">Search</button>
+        <button className="px-4 py-2 bg-accent text-bg rounded-md font-medium" disabled={loading}>
+          {loading ? "Searching…" : "Search"}
+        </button>
       </form>
 
-      {results.length > 0 ? (
+      {loading ? (
+        <div className="bg-panel rounded-lg p-8 border border-panel2 text-center">
+          <p className="text-muted">Searching…</p>
+        </div>
+      ) : results.length > 0 ? (
         <TrackList tracks={results} onDelete={() => api.search(q.trim()).then(setResults)} />
       ) : searched && q.trim() ? (
         <div className="bg-panel2 border border-panel2 rounded-lg p-8 text-center space-y-4">

@@ -51,6 +51,7 @@ export default function MobileNavBar() {
               key={item.to}
               to={item.to}
               className="flex flex-col items-center justify-center flex-1 h-full"
+              aria-label={item.label}
             >
               <item.icon
                 size={20}
@@ -71,6 +72,7 @@ export default function MobileNavBar() {
         <button
           onClick={() => setSheetOpen(true)}
           className="flex flex-col items-center justify-center flex-1 h-full"
+          aria-label="More navigation options"
         >
           <Menu
             size={20}
@@ -123,6 +125,7 @@ export default function MobileNavBar() {
                         ? "bg-panel2 text-accent"
                         : "text-muted hover:bg-panel2/50 hover:text-text"
                     }`}
+                    aria-label={item.label}
                   >
                     <item.icon size={22} />
                     <span className="text-xs">{item.label}</span>

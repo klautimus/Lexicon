@@ -44,6 +44,7 @@ Source: "tools\ffmpeg.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifs
 Source: "tools\ffprobe.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "tools\ngrok.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "tools\poddl.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "lexicon-launch.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
 Name: "{app}\data"; Permissions: everyone-modify
@@ -56,7 +57,10 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -Command ""Start-Process '{app}\{#MyAppExeName}' -WorkingDirectory '{app}'; $$port = {code:GetFrontendPort}; $$url = 'http://localhost:' + $$port; $$maxRetries = 30; $$retries = 0; while ($$retries -lt $$maxRetries) {{ try {{ $$r = Invoke-WebRequest -Uri $$url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; if ($$r.StatusCode -eq 200) {{ break }} }} catch {{ }}; Start-Sleep -Seconds 1; $$retries++ }}; Start-Process $$url"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\lexicon-launch.ps1"" -appPath ""{app}"" -port ""{code:GetFrontendPort}"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -Command ""Stop-Process -Name 'lexicon' -Force -ErrorAction SilentlyContinue"""; Flags: runhidden
 
 [Code]
 var
@@ -339,11 +343,29 @@ begin
       envPath := ExpandConstant('{app}\.env');
 
       if DirExists(dataPath) then
-        DelTree(dataPath, True, True, True);
+      begin
+        try
+          DelTree(dataPath, True, True, True);
+        except
+          MsgBox('Could not fully remove data folder. Some files may be in use.', mbError, MB_OK);
+        end;
+      end;
       if DirExists(podcastsPath) then
-        DelTree(podcastsPath, True, True, True);
+      begin
+        try
+          DelTree(podcastsPath, True, True, True);
+        except
+          MsgBox('Could not fully remove podcasts folder. Some files may be in use.', mbError, MB_OK);
+        end;
+      end;
       if FileExists(envPath) then
-        DeleteFile(envPath);
+      begin
+        try
+          DeleteFile(envPath);
+        except
+          MsgBox('Could not delete .env file. It may be in use.', mbError, MB_OK);
+        end;
+      end;
     end;
   end;
 end;

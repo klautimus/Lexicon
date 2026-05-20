@@ -115,6 +115,17 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "name must be 256 characters or fewer", 400)
 		return
 	}
+	// Check for duplicate name before creating
+	var existingID int64
+	if err := a.db.QueryRowContext(r.Context(), `SELECT id FROM playlists WHERE name=?`, req.Name).Scan(&existingID); err != sql.ErrNoRows {
+		if err == nil {
+			writeError(w, "playlist with this name already exists", 409)
+			return
+		}
+		log.Printf("[playlists] create duplicate check: %v", err)
+		writeError(w, err.Error(), 500)
+		return
+	}
 	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name) VALUES (?)`, req.Name)
 	if err != nil {
 		log.Printf("[playlists] create insert: %v", err)
@@ -150,7 +161,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t models.Track
 		var path, title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
-		var spotifyID, externalURL sql.NullString
+		var spotifyID, externalURL, appleID sql.NullString
 		var trackNo, discNo, year, durationSec sql.NullInt64
 		var sizeBytes, addedAt, mtime sql.NullInt64
 		var coverPath sql.NullString
@@ -163,7 +174,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 			&durationSec, &mediaKind, &mime,
 			&sizeBytes, &coverPath, &addedAt, &mtime,
 			&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
-			&spotifyID, &externalURL,
+			&spotifyID, &externalURL, &appleID,
 			&position,
 		)
 		if err != nil {
@@ -192,6 +203,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		if loudnessRange.Valid { t.LoudnessRange = loudnessRange.Float64 }
 		if spotifyID.Valid { t.SpotifyID = spotifyID.String }
 		if externalURL.Valid { t.ExternalURL = externalURL.String }
+		if appleID.Valid { t.AppleID = appleID.String }
 		p.Tracks = append(p.Tracks, PlaylistTrack{Track: t, Position: position})
 		p.TotalDuration += int(t.DurationSec)
 	}
@@ -360,6 +372,12 @@ func (a *API) removeTrack(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		writeError(w, "track not found", 404)
 		return
+	}
+	// Recompact positions: decrement all positions after the removed one
+	if _, err := a.db.ExecContext(r.Context(),
+		`UPDATE playlist_items SET position = position - 1 WHERE playlist_id=? AND position > ?`,
+		id, position); err != nil {
+		log.Printf("[playlists] removeTrack recompact playlist %d position %d: %v", id, position, err)
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }

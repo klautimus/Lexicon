@@ -24,6 +24,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+
+	"github.com/kevin/lexicon/internal/recommender"
 )
 
 // Spotiflac exits with status 0 even when every track failed. We parse its
@@ -165,6 +167,14 @@ type API struct {
 	maxKeep        int
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+	// fileCache caches directory listings for findDownloadedFile
+	fileCache     map[string]fileCacheEntry
+	fileCacheTime time.Time
+}
+
+type fileCacheEntry struct {
+	modTime time.Time
+	path    string
 }
 
 func New(cfg Config, db *sql.DB, rescan RescanFunc) *API {
@@ -1207,8 +1217,28 @@ func (a *API) verifyDownloadedFile(ctx context.Context, path string) error {
 
 func (a *API) findDownloadedFile(before time.Time) string {
 	cutoff := before.Add(-5 * time.Minute)
+	a.mu.Lock()
+	// Reuse cache if it's less than 30 seconds old
+	if a.fileCache != nil && time.Since(a.fileCacheTime) < 30*time.Second {
+		best := ""
+		bestTime := time.Time{}
+		for _, entry := range a.fileCache {
+			if entry.modTime.After(cutoff) && entry.modTime.Before(before.Add(5*time.Minute)) {
+				if entry.modTime.After(bestTime) {
+					bestTime = entry.modTime
+					best = entry.path
+				}
+			}
+		}
+		a.mu.Unlock()
+		return best
+	}
+	a.mu.Unlock()
+
+	// Cache miss: walk the directory
 	var best string
 	bestTime := time.Time{}
+	newCache := make(map[string]fileCacheEntry)
 	filepath.Walk(a.cfg.Output, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
@@ -1216,6 +1246,7 @@ func (a *API) findDownloadedFile(before time.Time) string {
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
 		case ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wav", ".opus", ".webm", ".mp4":
+			newCache[path] = fileCacheEntry{modTime: info.ModTime(), path: path}
 			if info.ModTime().After(cutoff) && info.ModTime().Before(before.Add(5*time.Minute)) {
 				if info.ModTime().After(bestTime) {
 					bestTime = info.ModTime()
@@ -1225,6 +1256,10 @@ func (a *API) findDownloadedFile(before time.Time) string {
 		}
 		return nil
 	})
+	a.mu.Lock()
+	a.fileCache = newCache
+	a.fileCacheTime = time.Now()
+	a.mu.Unlock()
 	return best
 }
 
@@ -1302,33 +1337,17 @@ Rules for search_query:
 
 If the query is ambiguous, make your best guess. Output ONLY JSON, no markdown.`, query)
 
-	type dsMessage struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	type dsRequest struct {
-		Model          string      `json:"model"`
-		Messages       []dsMessage `json:"messages"`
-		Temperature    float64    `json:"temperature"`
-		ThinkingEffort string     `json:"thinking_effort,omitempty"`
-	}
-	type dsResponse struct {
-		Choices []struct {
-			Message dsMessage `json:"message"`
-		} `json:"choices"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error,omitempty"`
-	}
-
-	reqBody := dsRequest{
+	reqBody := recommender.DSRequest{
 		Model: a.cfg.DeepSeekModel,
-		Messages: []dsMessage{
+		Messages: []recommender.DSMessage{
 			{Role: "system", Content: "You are a music/podcast metadata parser. Respond with JSON only."},
 			{Role: "user", Content: prompt},
 		},
-		Temperature:    0.3,
-		ThinkingEffort: a.cfg.DeepSeekThinking,
+		Temperature: 0.3,
+	}
+	// reasoning_effort is only valid for deepseek-reasoner models
+	if strings.Contains(a.cfg.DeepSeekModel, "reasoner") && a.cfg.DeepSeekThinking != "" {
+		reqBody.ReasoningEffort = a.cfg.DeepSeekThinking
 	}
 	buf, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1/chat/completions", bytes.NewReader(buf))
@@ -1351,7 +1370,7 @@ If the query is ambiguous, make your best guess. Output ONLY JSON, no markdown.`
 	if resp.StatusCode >= 300 {
 		return deepseekMetadata{}, fmt.Errorf("deepseek %d: %s", resp.StatusCode, string(body))
 	}
-	var dr dsResponse
+	var dr recommender.DSResponse
 	if err := json.Unmarshal(body, &dr); err != nil {
 		return deepseekMetadata{}, fmt.Errorf("decode: %v", err)
 	}

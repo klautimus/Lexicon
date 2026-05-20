@@ -418,7 +418,7 @@ REMEMBER: Always return a JSON object with a "message" field.
 	reply, err := a.deepseekChatWithRetry(ctx, []map[string]string{
 		{"role": "system", "content": system},
 		{"role": "user", "content": req.Message},
-	}, &dsRespFmt{Type: "json_object"}, func(raw string) error {
+	}, &DSRespFmt{Type: "json_object"}, func(raw string) error {
 		var dummy struct {
 			Message  string          `json:"message"`
 			Playlist PlaylistPayload `json:"playlist"`
@@ -468,7 +468,10 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 		for rows.Next() {
 			var a string
 			var n int
-			rows.Scan(&a, &n)
+			if err := rows.Scan(&a, &n); err != nil {
+				log.Printf("[recommender] profile top-artists scan: %v", err)
+				continue
+			}
 			if a == "" {
 				continue
 			}
@@ -912,25 +915,30 @@ Rules:
 	return out, nil
 }
 
-type dsMessage struct {
+// DSMessage represents a chat message for the DeepSeek API.
+type DSMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-type dsRequest struct {
-	Model           string      `json:"model"`
-	Messages        []dsMessage `json:"messages"`
-	Temperature     float64     `json:"temperature"`
-	ThinkingEffort  string      `json:"thinking_effort,omitempty"`
-	ResponseFormat  *dsRespFmt  `json:"response_format,omitempty"`
+// DSRequest represents a chat completion request for the DeepSeek API.
+type DSRequest struct {
+	Model           string       `json:"model"`
+	Messages        []DSMessage  `json:"messages"`
+	Temperature     float64      `json:"temperature"`
+	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+	ResponseFormat  *DSRespFmt   `json:"response_format,omitempty"`
 }
-type dsRespFmt struct {
+
+// DSRespFmt specifies the response format for DeepSeek API calls.
+type DSRespFmt struct {
 	Type string `json:"type"`
 }
 
-type dsResponse struct {
+// DSResponse represents a chat completion response from the DeepSeek API.
+type DSResponse struct {
 	Choices []struct {
-		Message dsMessage `json:"message"`
+		Message DSMessage `json:"message"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -941,7 +949,7 @@ type dsResponse struct {
 func (a *API) deepseekChatWithRetry(
 	ctx context.Context,
 	msgs []map[string]string,
-	respFmt *dsRespFmt,
+	respFmt *DSRespFmt,
 	parseFn func(string) error,
 ) (string, error) {
 	reply, err := a.deepseekChat(ctx, msgs, respFmt)
@@ -990,20 +998,20 @@ func (a *API) deepseekChatWithRetry(
 	return reply, nil
 }
 
-func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFmt *dsRespFmt) (string, error) {
-	dmsgs := make([]dsMessage, len(msgs))
+func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFmt *DSRespFmt) (string, error) {
+	dmsgs := make([]DSMessage, len(msgs))
 	for i, m := range msgs {
-		dmsgs[i] = dsMessage{Role: m["role"], Content: m["content"]}
+		dmsgs[i] = DSMessage{Role: m["role"], Content: m["content"]}
 	}
-	reqBody := dsRequest{
+	reqBody := DSRequest{
 		Model:          a.cfg.Model,
 		Messages:       dmsgs,
 		Temperature:    0.7,
 		ResponseFormat: respFmt,
 	}
-	// thinking_effort is only valid for deepseek-reasoner models
+	// reasoning_effort is only valid for deepseek-reasoner models
 	if strings.Contains(a.cfg.Model, "reasoner") && a.cfg.Thinking != "" {
-		reqBody.ThinkingEffort = a.cfg.Thinking
+		reqBody.ReasoningEffort = a.cfg.Thinking
 	}
 	buf, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, "POST", a.cfg.BaseURL+"/v1/chat/completions", bytes.NewReader(buf))
@@ -1022,7 +1030,7 @@ func (a *API) deepseekChat(ctx context.Context, msgs []map[string]string, respFm
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("deepseek %d: %s", resp.StatusCode, string(body))
 	}
-	var dr dsResponse
+	var dr DSResponse
 	if err := json.Unmarshal(body, &dr); err != nil {
 		return "", fmt.Errorf("decode: %v", err)
 	}

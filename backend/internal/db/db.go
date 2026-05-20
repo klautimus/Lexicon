@@ -2,8 +2,10 @@ package db
 
 import (
 	"database/sql"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	_ "modernc.org/sqlite"
 )
@@ -42,7 +44,8 @@ CREATE TABLE IF NOT EXISTS tracks (
 	added_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
 	mtime INTEGER,
 	spotify_id TEXT,
-	external_url TEXT
+	external_url TEXT,
+	apple_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
@@ -53,15 +56,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
 	title, artist, album, genre,
 	content='tracks', content_rowid='id'
 );
-CREATE TRIGGER IF NOT EXISTS tracks_ai AFTER INSERT ON tracks BEGIN
+DROP TRIGGER IF EXISTS tracks_ai;
+CREATE TRIGGER tracks_ai AFTER INSERT ON tracks BEGIN
 	INSERT INTO tracks_fts(rowid, title, artist, album, genre)
 	VALUES (new.id, new.title, new.artist, new.album, new.genre);
 END;
-CREATE TRIGGER IF NOT EXISTS tracks_ad AFTER DELETE ON tracks BEGIN
+DROP TRIGGER IF EXISTS tracks_ad;
+CREATE TRIGGER tracks_ad AFTER DELETE ON tracks BEGIN
 	INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre)
 	VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre);
 END;
-CREATE TRIGGER IF NOT EXISTS tracks_au AFTER UPDATE ON tracks BEGIN
+DROP TRIGGER IF EXISTS tracks_au;
+CREATE TRIGGER tracks_au AFTER UPDATE ON tracks BEGIN
 	INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre)
 	VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre);
 	INSERT INTO tracks_fts(rowid, title, artist, album, genre)
@@ -97,6 +103,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
 	prompt_hash TEXT,
 	payload TEXT NOT NULL -- JSON: {summary, items:[{title,artist,reason,track_id?}]}
 );
+CREATE INDEX IF NOT EXISTS idx_recommendations_hash ON recommendations(prompt_hash);
 
 CREATE TABLE IF NOT EXISTS spotify_tokens (
 	id INTEGER PRIMARY KEY CHECK (id=1),
@@ -129,7 +136,6 @@ CREATE TABLE IF NOT EXISTS download_jobs (
 	used_fallback INTEGER NOT NULL DEFAULT 0,
 	is_search INTEGER NOT NULL DEFAULT 0,
 	track_id INTEGER,
-	kind TEXT NOT NULL DEFAULT 'music',
 	created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status);
@@ -228,6 +234,10 @@ func columnExists(db *sql.DB, table, column string) bool {
 	if !validTables[table] {
 		return false
 	}
+	if matched, _ := regexp.MatchString(`^[a-z_]+$`, column); !matched {
+		log.Printf("[db] columnExists: invalid column name %q", column)
+		return false
+	}
 	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return false
@@ -239,6 +249,7 @@ func columnExists(db *sql.DB, table, column string) bool {
 		var notnull, pk int
 		var dflt interface{}
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			log.Printf("[db] columnExists scan %s.%s: %v", table, column, err)
 			return false
 		}
 		if name == column {

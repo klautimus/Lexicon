@@ -18,7 +18,7 @@ export default function SettingsPage() {
       const s = await api.spotifyStatus();
       setStatus(s);
     } catch (e) {
-      // ignore
+      console.error("[SettingsPage] failed to load Spotify status", e);
     }
   }
   useEffect(() => {

@@ -18,7 +18,8 @@ import { useToast } from "../contexts/ToastContext";
 import { useHelp } from "../contexts/HelpContext";
 import { useIsMobile } from "../hooks/useIsMobile";
 
-function formatDuration(sec: number) {
+function formatDuration(sec: number | null | undefined) {
+  if (!sec || sec <= 0) return "0:00";
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;

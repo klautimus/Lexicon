@@ -60,21 +60,23 @@ export default function PlayerBar() {
             className={`hover:text-text transition disabled:opacity-30 ${
               p.shuffled ? "text-accent" : "text-muted"
             }`}
+            aria-label={p.shuffled ? "Shuffle on" : "Shuffle off"}
             title="Shuffle"
           >
             <Shuffle size={18} />
           </button>
-          <button onClick={p.prev} className="text-muted hover:text-text" disabled={!t}>
+          <button onClick={p.prev} className="text-muted hover:text-text" disabled={!t} aria-label="Previous track">
             <SkipBack size={18} />
           </button>
           <button
             onClick={p.toggle}
             disabled={!t}
             className="w-9 h-9 rounded-full bg-accent text-bg flex items-center justify-center hover:scale-105 transition disabled:opacity-30"
+            aria-label={p.playing ? "Pause" : "Play"}
           >
             {p.playing ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
           </button>
-          <button onClick={p.next} className="text-muted hover:text-text" disabled={!t}>
+          <button onClick={p.next} className="text-muted hover:text-text" disabled={!t} aria-label="Next track">
             <SkipForward size={18} />
           </button>
           <button
@@ -83,6 +85,9 @@ export default function PlayerBar() {
             className={`hover:text-text transition disabled:opacity-30 ${
               p.repeatMode !== "off" ? "text-accent" : "text-muted"
             }`}
+            aria-label={
+              p.repeatMode === "off" ? "Repeat off" : p.repeatMode === "all" ? "Repeat all" : "Repeat one"
+            }
             title={
               p.repeatMode === "off" ? "Repeat Off" : p.repeatMode === "all" ? "Repeat All" : "Repeat One"
             }
@@ -102,6 +107,7 @@ export default function PlayerBar() {
             value={p.volume}
             onChange={(e) => p.setVolume(Number(e.target.value))}
             className="flex-1 accent-accent"
+            aria-label="Volume"
           />
         </div>
 
@@ -130,17 +136,18 @@ export default function PlayerBar() {
 
       {/* ── Row 2: Progress bar (all screen sizes) ── */}
       <div className="flex items-center gap-2 w-full">
-        <span className="w-8 text-right text-[10px] text-muted">{fmt(p.position)}</span>
+        <span className="w-8 text-right text-[10px] text-muted" aria-hidden="true">{fmt(p.position)}</span>
         <input
           type="range"
           min={0}
-          max={p.duration || 1}
+          max={p.duration > 0 ? p.duration : 1}
           value={p.duration ? Math.min(p.position, p.duration) : 0}
           onChange={(e) => p.seek(Number(e.target.value))}
           className="flex-1 accent-accent"
           disabled={!t}
+          aria-label="Seek"
         />
-        <span className="w-8 text-[10px] text-muted">{fmt(p.duration)}</span>
+        <span className="w-8 text-[10px] text-muted" aria-hidden="true">{fmt(p.duration)}</span>
       </div>
     </div>
   );

@@ -79,6 +79,9 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 	kind := r.URL.Query().Get("kind")
 
 	var total int
@@ -379,24 +382,22 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		Podcasts int `json:"podcasts"`
 	}
 	var s Stats
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tracks WHERE media_kind='music'`).Scan(&s.Tracks); err != nil {
-		log.Printf("[library] stats tracks: %v", err)
-		writeError(w, err.Error(), 500)
+	tx, err := a.db.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		log.Printf("[library] stats beginTx: %v", err)
+		writeError(w, "failed to load stats", 500)
 		return
 	}
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT album) FROM tracks WHERE media_kind='music' AND IFNULL(album,'')!=''`).Scan(&s.Albums); err != nil {
-		log.Printf("[library] stats albums: %v", err)
-		writeError(w, err.Error(), 500)
-		return
-	}
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT COALESCE(NULLIF(album_artist,''),artist)) FROM tracks WHERE media_kind='music'`).Scan(&s.Artists); err != nil {
-		log.Printf("[library] stats artists: %v", err)
-		writeError(w, err.Error(), 500)
-		return
-	}
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT COALESCE(NULLIF(album,''),album_artist,artist)) FROM tracks WHERE media_kind='podcast'`).Scan(&s.Podcasts); err != nil {
-		log.Printf("[library] stats podcasts: %v", err)
-		writeError(w, err.Error(), 500)
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(r.Context(), `
+		SELECT
+			(SELECT COUNT(*) FROM tracks WHERE media_kind='music') AS tracks,
+			(SELECT COUNT(DISTINCT album) FROM tracks WHERE media_kind='music' AND IFNULL(album,'')!='') AS albums,
+			(SELECT COUNT(DISTINCT COALESCE(NULLIF(album_artist,''),artist)) FROM tracks WHERE media_kind='music') AS artists,
+			(SELECT COUNT(DISTINCT COALESCE(NULLIF(album,''),album_artist,artist)) FROM tracks WHERE media_kind='podcast') AS podcasts
+	`).Scan(&s.Tracks, &s.Albums, &s.Artists, &s.Podcasts); err != nil {
+		log.Printf("[library] stats query: %v", err)
+		writeError(w, "failed to load stats", 500)
 		return
 	}
 	writeJSON(w, s)

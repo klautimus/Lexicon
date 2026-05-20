@@ -26,10 +26,24 @@ export default function DownloadsPage() {
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const pollRef = useRef<number | null>(null);
   const expandedRef = useRef<Record<string, boolean>>(expanded);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     expandedRef.current = expanded;
   }, [expanded]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    refresh();
+    const id = window.setInterval(refresh, 1500);
+    pollRef.current = id;
+    return () => {
+      mountedRef.current = false;
+      clearInterval(id);
+      pollRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function refresh() {
     try {
@@ -37,6 +51,7 @@ export default function DownloadsPage() {
         api.downloadStatus(),
         api.downloadJobs(),
       ]);
+      if (!mountedRef.current) return;
       setStatus(s);
       setJobs(j);
       const currentExpanded = expandedRef.current;
@@ -44,9 +59,10 @@ export default function DownloadsPage() {
         if (currentExpanded[id]) {
           api
             .downloadJob(id)
-            .then((full) =>
-              setLogs((prev) => ({ ...prev, [id]: full.log || [] }))
-            )
+            .then((full) => {
+              if (!mountedRef.current) return;
+              setLogs((prev) => ({ ...prev, [id]: full.log || [] }));
+            })
             .catch(() => {});
         }
       }
@@ -54,17 +70,6 @@ export default function DownloadsPage() {
       // ignore
     }
   }
-
-  useEffect(() => {
-    refresh();
-    const id = window.setInterval(refresh, 1500);
-    pollRef.current = id;
-    return () => {
-      clearInterval(id);
-      pollRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

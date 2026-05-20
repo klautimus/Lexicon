@@ -31,13 +31,17 @@ export default function AnalyticsPage() {
   const [tracks, setTracks] = useState<TopTrack[]>([]);
   const [genres, setGenres] = useState<TopGenre[]>([]);
   const [heat, setHeat] = useState<HeatCell[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    api.overview().then(setOv).catch(() => {});
-    api.topArtists().then(setArtists).catch(() => {});
-    api.topTracks().then(setTracks).catch(() => {});
-    api.topGenres().then(setGenres).catch(() => {});
-    api.heatmap().then(setHeat).catch(() => {});
+    Promise.all([
+      api.overview().then(setOv).catch(() => setError(true)),
+      api.topArtists().then(setArtists).catch(() => setError(true)),
+      api.topTracks().then(setTracks).catch(() => setError(true)),
+      api.topGenres().then(setGenres).catch(() => setError(true)),
+      api.heatmap().then(setHeat).catch(() => setError(true)),
+    ]).finally(() => setLoading(false));
   }, []);
 
   const heatLookup = new Map<string, number>();
@@ -45,6 +49,32 @@ export default function AnalyticsPage() {
   for (const c of heat) {
     heatLookup.set(`${c.dow}-${c.hour}`, c.plays);
     if (c.plays > heatMax) heatMax = c.plays;
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-8">
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-semibold">Listening Analytics</h1>
+        </div>
+        <div className="bg-panel rounded-lg p-8 border border-panel2 text-center">
+          <p className="text-muted">Loading analytics…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-8">
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-semibold">Listening Analytics</h1>
+        </div>
+        <div className="bg-panel rounded-lg p-8 border border-panel2 text-center">
+          <p className="text-muted">Failed to load analytics. <button onClick={() => { setError(false); setLoading(true); Promise.all([api.overview().then(setOv).catch(() => setError(true)), api.topArtists().then(setArtists).catch(() => setError(true)), api.topTracks().then(setTracks).catch(() => setError(true)), api.topGenres().then(setGenres).catch(() => setError(true)), api.heatmap().then(setHeat).catch(() => setError(true))]).finally(() => setLoading(false)); }} className="text-accent hover:underline">Retry</button></p>
+        </div>
+      </div>
+    );
   }
 
   return (

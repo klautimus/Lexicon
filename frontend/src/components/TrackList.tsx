@@ -156,6 +156,7 @@ function TrackRow({
         <button
           onClick={() => p.play(tracks, index)}
           className="opacity-0 group-hover:opacity-100 hover:text-accent"
+          aria-label={`Play ${track.title}`}
         >
           <Play size={14} />
         </button>
@@ -172,6 +173,7 @@ function TrackRow({
               toggle();
             }}
             className="opacity-0 group-hover:opacity-100 text-muted hover:text-text p-1"
+            aria-label="Track actions menu"
           >
             <MoreHorizontal size={14} />
           </button>
@@ -452,6 +454,7 @@ function MobileTrackCard({
         <button
           onClick={toggle}
           className="w-9 h-9 flex items-center justify-center text-muted"
+          aria-label="Track actions menu"
         >
           <MoreHorizontal size={18} />
         </button>
