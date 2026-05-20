@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -26,25 +27,34 @@ type Config struct {
 }
 
 type API struct {
-	db        *sql.DB
-	cfg       Config
-	sync      *Syncer
-	verifiers sync.Map
+	db             *sql.DB
+	cfg            Config
+	sync           *Syncer
+	verifiers      sync.Map
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 func New(db *sql.DB, cfg Config) *API {
-	a := &API{db: db, cfg: cfg}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	a := &API{db: db, cfg: cfg, shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel}
 	a.sync = NewSyncer(db, cfg)
 	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
 		for {
-			time.Sleep(5 * time.Minute)
-			cutoff := time.Now().Add(-10 * time.Minute)
-			a.verifiers.Range(func(key, value any) bool {
-				if entry, ok := value.(verifierEntry); ok && entry.CreatedAt.Before(cutoff) {
-					a.verifiers.Delete(key)
-				}
-				return true
-			})
+			select {
+			case <-a.shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-10 * time.Minute)
+				a.verifiers.Range(func(key, value any) bool {
+					if entry, ok := value.(verifierEntry); ok && entry.CreatedAt.Before(cutoff) {
+						a.verifiers.Delete(key)
+					}
+					return true
+				})
+			}
 		}
 	}()
 	return a
@@ -52,6 +62,20 @@ func New(db *sql.DB, cfg Config) *API {
 
 // Syncer returns the background syncer so main can start it.
 func (a *API) Syncer() *Syncer { return a.sync }
+
+// Shutdown signals the background syncer goroutine to cancel and exit.
+// Call this before shutting down the HTTP server so that the syncer's
+// goroutine observes the cancelled context and exits promptly.
+func (a *API) Shutdown() {
+	a.shutdownCancel()
+}
+
+// StartSyncer launches the background syncer goroutine using the API's
+// shutdown context. Safe to call once at startup. No-op if called multiple
+// times (the syncer goroutine is already running).
+func (a *API) StartSyncer() {
+	a.sync.Start(a.shutdownCtx)
+}
 
 func (a *API) Mount(r chi.Router) {
 	r.Get("/api/spotify/auth-url", a.authURL)
@@ -66,7 +90,9 @@ func (a *API) Mount(r chi.Router) {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[spotify] writeJSON encode: %v", err)
+	}
 }
 
 func (a *API) configured() bool {
@@ -82,11 +108,13 @@ func (a *API) devices(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	token, err := a.ValidAccessToken(ctx)
 	if err != nil {
+		log.Printf("[spotify] devices: not connected: %v", err)
 		http.Error(w, "not connected: "+err.Error(), 400)
 		return
 	}
 	devs, err := GetDevices(ctx, token)
 	if err != nil {
+		log.Printf("[spotify] devices: get devices: %v", err)
 		http.Error(w, "failed to get devices: "+err.Error(), 500)
 		return
 	}
@@ -105,6 +133,7 @@ func (a *API) transfer(w http.ResponseWriter, r *http.Request) {
 	}
 	var req transferReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[spotify] transfer: decode: %v", err)
 		http.Error(w, "bad json", 400)
 		return
 	}
@@ -112,10 +141,12 @@ func (a *API) transfer(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	token, err := a.ValidAccessToken(ctx)
 	if err != nil {
+		log.Printf("[spotify] transfer: not connected: %v", err)
 		http.Error(w, "not connected: "+err.Error(), 400)
 		return
 	}
 	if err := TransferPlayback(ctx, token, req.DeviceID, req.Play); err != nil {
+		log.Printf("[spotify] transfer: transfer playback: %v", err)
 		http.Error(w, "transfer failed: "+err.Error(), 500)
 		return
 	}

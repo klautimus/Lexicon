@@ -53,17 +53,20 @@ type Config struct {
 }
 
 type API struct {
-	db     *sql.DB
-	cfg    Config
-	rescan func()
-	jobs   JobSink
-	mu     sync.Mutex
+	db             *sql.DB
+	cfg            Config
+	rescan         func()
+	jobs           JobSink
+	mu             sync.Mutex
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // New constructs a podcaster API. `jobs` may be nil — in which case downloads
 // still work but won't appear on the Downloads page. Pass *downloader.API.
 func New(db *sql.DB, cfg Config, rescan func(), jobs JobSink) *API {
-	return &API{db: db, cfg: cfg, rescan: rescan, jobs: jobs}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	return &API{db: db, cfg: cfg, rescan: rescan, jobs: jobs, shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel}
 }
 
 func (a *API) Mount(r chi.Router) {
@@ -78,6 +81,31 @@ func (a *API) Mount(r chi.Router) {
 	r.Get("/api/podcasts/episodes/{id}/position", a.getEpisodePosition)
 	r.Get("/api/podcasts/status", a.status)
 	r.Get("/api/podcasts/episodes/{id}/track", a.episodeTrack)
+}
+
+// Shutdown signals all in-flight podcaster goroutines to cancel.
+// Call this before shutting down the HTTP server so that doSyncFeed /
+// doDownloadEpisode / doDownloadFeed goroutines observe the cancelled
+// context and exit promptly.
+func (a *API) Shutdown() {
+	a.shutdownCancel()
+}
+
+// jobContext returns a context that is cancelled when either the request
+// context is cancelled (client disconnect) or the shutdown context is
+// cancelled (server shutting down). Pass this to doSyncFeed /
+// doDownloadEpisode / doDownloadFeed so that in-flight work is promptly
+// cancelled on shutdown.
+func (a *API) jobContext(reqCtx context.Context) context.Context {
+	ctx, cancel := context.WithCancel(a.shutdownCtx)
+	go func() {
+		select {
+		case <-reqCtx.Done():
+		case <-a.shutdownCtx.Done():
+		}
+		cancel()
+	}()
+	return ctx
 }
 
 // ----- Types returned to frontend -----
@@ -115,7 +143,9 @@ type EpisodeJSON struct {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[podcaster] writeJSON encode: %v", err)
+	}
 }
 
 // jobLog appends a line to the unified job log if a sink is configured.
@@ -162,7 +192,7 @@ func guessAudioExt(audioURL, audioType string) string {
 	if u, err := url.Parse(audioURL); err == nil {
 		if ext := strings.ToLower(filepath.Ext(u.Path)); ext != "" {
 			switch ext {
-			case ".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac":
+			case ".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".flac", ".mp4", ".webm":
 				return ext
 			}
 		}
@@ -447,12 +477,17 @@ func (a *API) listFeeds(w http.ResponseWriter, r *http.Request) {
 		var lastFetched sql.NullInt64
 		if err := rows.Scan(&f.ID, &f.URL, &f.Title, &f.Description, &f.ImageURL, &f.Author,
 			&f.EpisodeCount, &f.DownloadedCount, &lastFetched, &f.AutoDownload); err != nil {
-			continue
+			http.Error(w, err.Error(), 500)
+			return
 		}
 		if lastFetched.Valid {
 			f.LastFetchedAt = lastFetched.Int64
 		}
 		feeds = append(feeds, f)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
 	}
 	writeJSON(w, feeds)
 }
@@ -482,7 +517,8 @@ func (a *API) listEpisodes(w http.ResponseWriter, r *http.Request) {
 		var playbackPositionSec sql.NullInt64
 		var listened int
 		if err := rows.Scan(&e.ID, &e.FeedID, &e.GUID, &e.Title, &e.Description, &pubDate, &durationSec, &e.AudioURL, &e.Downloaded, &filePath, &downloadError, &playbackPositionSec, &listened); err != nil {
-			continue
+			http.Error(w, err.Error(), 500)
+			return
 		}
 		if pubDate.Valid {
 			e.PubDate = pubDate.Int64
@@ -502,6 +538,10 @@ func (a *API) listEpisodes(w http.ResponseWriter, r *http.Request) {
 		e.Listened = listened == 1
 		episodes = append(episodes, e)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, episodes)
 }
 
@@ -520,7 +560,7 @@ func (a *API) syncFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
-		if err := a.doSyncFeed(feedID, feedURL); err != nil {
+		if err := a.doSyncFeed(a.jobContext(r.Context()), feedID, feedURL); err != nil {
 			log.Printf("[podcaster] sync feed %d error: %v", feedID, err)
 		}
 	}()
@@ -528,11 +568,19 @@ func (a *API) syncFeed(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-func (a *API) doSyncFeed(feedID int64, feedURL string) error {
+func (a *API) doSyncFeed(ctx context.Context, feedID int64, feedURL string) error {
+	if feedURL == "" {
+		return fmt.Errorf("feed URL is empty")
+	}
+	u, err := url.Parse(feedURL)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid feed URL: %s", feedURL)
+	}
+
 	fp := gofeed.NewParser()
 	feed, err := fp.ParseURL(feedURL)
 	if err != nil {
-		a.db.Exec(`UPDATE podcast_feeds SET last_error=? WHERE id=?`, err.Error(), feedID)
+		a.db.ExecContext(ctx, `UPDATE podcast_feeds SET last_error=? WHERE id=?`, err.Error(), feedID)
 		return err
 	}
 
@@ -547,7 +595,7 @@ func (a *API) doSyncFeed(feedID int64, feedURL string) error {
 		authorName = feed.Author.Name
 	}
 
-	a.db.Exec(`UPDATE podcast_feeds SET title=?, description=?, image_url=?, author=?, last_fetched_at=?, last_error='' WHERE id=?`,
+	a.db.ExecContext(ctx, `UPDATE podcast_feeds SET title=?, description=?, image_url=?, author=?, last_fetched_at=?, last_error='' WHERE id=?`,
 		feed.Title, feed.Description, imageURL, authorName, now, feedID)
 
 	for _, item := range feed.Items {
@@ -576,7 +624,7 @@ func (a *API) doSyncFeed(feedID int64, feedURL string) error {
 			}
 		}
 
-		_, _ = a.db.Exec(
+		_, _ = a.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO podcast_episodes(feed_id, guid, title, description, pub_date, audio_url, audio_type, audio_size, created_at)
 			 VALUES(?,?,?,?,?,?,?,?,?)`,
 			feedID, guid, item.Title, item.Description, pubDate, audioURL, audioType, audioSize, now)
@@ -617,12 +665,12 @@ func (a *API) downloadEpisode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go a.doDownloadEpisode(episodeID, feedID, feedURL, feedTitle, audioURL, audioType, episodeTitle)
+	go a.doDownloadEpisode(a.jobContext(r.Context()), episodeID, feedID, feedURL, feedTitle, audioURL, audioType, episodeTitle)
 
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-func (a *API) doDownloadEpisode(episodeID, feedID int64, feedURL, feedTitle, audioURL, audioType, episodeTitle string) {
+func (a *API) doDownloadEpisode(ctx context.Context, episodeID, feedID int64, feedURL, feedTitle, audioURL, audioType, episodeTitle string) {
 	outputDir := a.cfg.OutputDir
 	if outputDir == "" {
 		outputDir = "."
@@ -656,15 +704,15 @@ func (a *API) doDownloadEpisode(episodeID, feedID int64, feedURL, feedTitle, aud
 	// the episode enclosure), use HTTP. Only fall back to poddl when no
 	// direct URL is available.
 	if audioURL != "" {
-		a.downloadDirectAudio(jobID, episodeID, feedID, audioURL, audioType, episodeTitle, outputDir)
+		a.downloadDirectAudio(ctx, jobID, episodeID, feedID, audioURL, audioType, episodeTitle, outputDir)
 	} else {
-		a.downloadViaPoddl(jobID, episodeID, feedURL, outputDir)
+		a.downloadViaPoddl(ctx, jobID, episodeID, feedURL, outputDir)
 	}
 }
 
 // downloadDirectAudio downloads a direct audio URL via HTTP.
 // poddl only accepts RSS feed URLs, so we handle direct downloads ourselves.
-func (a *API) downloadDirectAudio(jobID string, episodeID, feedID int64, audioURL, audioType, episodeTitle, outputDir string) {
+func (a *API) downloadDirectAudio(ctx context.Context, jobID string, episodeID, feedID int64, audioURL, audioType, episodeTitle, outputDir string) {
 	a.jobLog(jobID, fmt.Sprintf("[http] GET %s", audioURL))
 
 	parsed, err := url.Parse(audioURL)
@@ -673,14 +721,18 @@ func (a *API) downloadDirectAudio(jobID string, episodeID, feedID int64, audioUR
 		a.recordEpisodeError(jobID, episodeID, msg)
 		return
 	}
-	_ = parsed // kept for future use (e.g. extracting host for User-Agent rules)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		msg := fmt.Sprintf("invalid URL scheme %q: must be http or https", parsed.Scheme)
+		a.recordEpisodeError(jobID, episodeID, msg)
+		return
+	}
 
 	filename := episodeFilename(feedID, episodeID, episodeTitle, audioURL, audioType)
 	outputPath := filepath.Join(outputDir, filename)
 
 	// Build request with proper User-Agent. Some podcast CDNs (acast,
 	// buzzsprout) return 403 to Go's default UA.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", audioURL, nil)
 	if err != nil {
@@ -772,12 +824,12 @@ func (a *API) recordEpisodeError(jobID string, episodeID int64, msg string) {
 
 // downloadViaPoddl uses poddl to download from an RSS feed URL.
 // Used as fallback when no direct audio URL is available.
-func (a *API) downloadViaPoddl(jobID string, episodeID int64, feedURL, outputDir string) {
+func (a *API) downloadViaPoddl(ctx context.Context, jobID string, episodeID int64, feedURL, outputDir string) {
 	if a.cfg.PoddlBin == "" {
 		a.recordEpisodeError(jobID, episodeID, "poddl is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	args := []string{feedURL, "-o", outputDir, "-r", "-t", "1"}
@@ -873,12 +925,12 @@ func (a *API) downloadFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go a.doDownloadFeed(feedID, feedURL, feedTitle)
+	go a.doDownloadFeed(a.jobContext(r.Context()), feedID, feedURL, feedTitle)
 
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-func (a *API) doDownloadFeed(feedID int64, feedURL, feedTitle string) {
+func (a *API) doDownloadFeed(ctx context.Context, feedID int64, feedURL, feedTitle string) {
 	outputDir := a.cfg.OutputDir
 	if outputDir == "" {
 		outputDir = "."
@@ -914,7 +966,7 @@ func (a *API) doDownloadFeed(feedID int64, feedURL, feedTitle string) {
 
 	// Download all episodes from the feed, newest first.
 	// -h flag: quit when first existing file is found (efficient incremental downloads).
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
 	args := []string{feedURL, "-o", outputDir, "-r", "-h"}
@@ -1025,10 +1077,10 @@ func (a *API) findNewAudioFiles(dir string, snapshotTime time.Time) []fileInfo {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(path))
-		switch ext {
-		case ".mp3", ".m4a", ".ogg", ".opus", ".flac", ".aac", ".wav":
-			if !info.ModTime().Before(snapshotTime) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".aac", ".wav", ".mp4", ".webm":
+		if !info.ModTime().Before(snapshotTime) {
 				files = append(files, fileInfo{path: path, size: info.Size(), modTime: info.ModTime()})
 			}
 		}
@@ -1078,7 +1130,7 @@ func (a *API) SyncAllFeeds() {
 		if err := rows.Scan(&id, &url); err != nil {
 			continue
 		}
-		if err := a.doSyncFeed(id, url); err != nil {
+		if err := a.doSyncFeed(context.Background(), id, url); err != nil {
 			log.Printf("[podcaster] background sync feed %d error: %v", id, err)
 		}
 	}

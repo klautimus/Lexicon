@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,17 @@ import (
 	"strings"
 	"time"
 )
+
+// httpClient is the shared HTTP client for Spotify API requests.
+// It uses a 30-second timeout to prevent indefinite hangs.
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
+// ErrNotConnected is returned when the user has not connected their Spotify account
+// (no token row in the database). Callers can use errors.Is to distinguish this
+// from transient DB or network errors.
+var ErrNotConnected = errors.New("spotify not connected")
 
 // ValidAccessToken returns a non-expired access token, refreshing if necessary.
 func (a *API) ValidAccessToken(ctx context.Context) (string, error) {
@@ -28,7 +40,10 @@ func ensureToken(ctx context.Context, db *sql.DB, clientID, clientSecret string)
 		`SELECT access_token, refresh_token, expires_at FROM spotify_tokens WHERE id=1`).
 		Scan(&access, &refresh, &expiresAt)
 	if err != nil {
-		return "", fmt.Errorf("not connected: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("%w: no token row in database", ErrNotConnected)
+		}
+		return "", fmt.Errorf("db error: %w", err)
 	}
 	// Refresh if expiring within 60s
 	if time.Now().Unix() >= expiresAt-60 {
@@ -69,7 +84,7 @@ func spotifyGET(ctx context.Context, accessToken, path string, q url.Values) (*h
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -182,8 +197,27 @@ func fetchArtistGenres(ctx context.Context, accessToken string, artistIDs []stri
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 300 {
-			log.Printf("[spotify] fetch artists batch: HTTP %d", resp.StatusCode)
-			continue
+			log.Printf("[spotify] fetch artists batch: HTTP %d: %s", resp.StatusCode, string(body))
+			// Retry once on 403 (may be transient token issue)
+			if resp.StatusCode == 403 {
+				log.Printf("[spotify] retrying artists batch after 403...")
+				time.Sleep(2 * time.Second)
+				resp2, err2 := spotifyGET(ctx, accessToken, "/artists?ids="+ids, nil)
+				if err2 != nil {
+					log.Printf("[spotify] retry failed: %v", err2)
+					continue
+				}
+				body2, _ := io.ReadAll(resp2.Body)
+				resp2.Body.Close()
+				if resp2.StatusCode >= 300 {
+					log.Printf("[spotify] retry also failed: HTTP %d: %s", resp2.StatusCode, string(body2))
+					continue
+				}
+				// Use the retry response
+				body = body2
+			} else {
+				continue
+			}
 		}
 		var result struct {
 			Artists []struct {
@@ -421,7 +455,14 @@ func GetDevices(ctx context.Context, accessToken string) ([]SpotifyDevice, error
 
 // TransferPlayback transfers playback to a specific device
 func TransferPlayback(ctx context.Context, accessToken string, deviceID string, play bool) error {
-	body := fmt.Sprintf(`{"device_ids":["%s"],"play":%t}`, deviceID, play)
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"device_ids": []string{deviceID},
+		"play":       play,
+	})
+	if err != nil {
+		return err
+	}
+	body := string(reqBody)
 	req, err := http.NewRequestWithContext(ctx, "PUT",
 		"https://api.spotify.com/v1/me/player", strings.NewReader(body))
 	if err != nil {
@@ -429,7 +470,7 @@ func TransferPlayback(ctx context.Context, accessToken string, deviceID string, 
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

@@ -163,13 +163,19 @@ func (s *Syncer) ingestPlay(ctx context.Context, item RecentItem, genreMap map[s
 	}
 
 	// Upsert by spotify_id — explicit SELECT/UPDATE/INSERT avoids SQLite partial-index ON CONFLICT limitation
+	// Note: loudness_integrated, loudness_true_peak, and loudness_range are left NULL for Spotify
+	// tracks. These columns measure local file loudness via ffmpeg during scanning. Spotify
+	// streams are already loudness-normalized server-side, so local measurement is not applicable.
+	// The Spotify Audio Features API provides integrated loudness but not true peak or range,
+	// and calling it per-track would significantly slow sync.
 	var trackID int64
 	err = s.db.QueryRowContext(ctx, `SELECT id FROM tracks WHERE spotify_id=?`, t.ID).Scan(&trackID)
 	if err == sql.ErrNoRows {
-		res, err := s.db.ExecContext(ctx, `
-			INSERT INTO tracks(path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, spotify_id, external_url)
-			VALUES('spotify:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', ?, ?)
-		`, t.ID, t.Name, artist, artist, album, year, genre, durSec, t.ID, externalURL)
+		now := time.Now().Unix()
+	res, err := s.db.ExecContext(ctx, `
+			INSERT INTO tracks(path, title, artist, album_artist, album, year, genre, duration_sec, mime, media_kind, size_bytes, cover_path, added_at, spotify_id, external_url)
+			VALUES('spotify:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', 0, '', ?, ?, ?)
+		`, t.ID, t.Name, artist, artist, album, year, genre, durSec, now, t.ID, externalURL)
 		if err != nil {
 			return err
 		}

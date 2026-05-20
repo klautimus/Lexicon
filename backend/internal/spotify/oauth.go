@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,11 +43,13 @@ func (a *API) authURL(w http.ResponseWriter, r *http.Request) {
 	}
 	verifier, err := randB64(64)
 	if err != nil {
+		log.Printf("[spotify] authURL: randB64 verifier: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	state, err := randB64(24)
 	if err != nil {
+		log.Printf("[spotify] authURL: randB64 state: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -81,12 +84,14 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 	code := q.Get("code")
 	state := q.Get("state")
 	if code == "" || state == "" {
+		log.Printf("[spotify] callback: missing code/state")
 		http.Error(w, "missing code/state", 400)
 		return
 	}
 	var verifier string
 	entry, ok := a.verifiers.Load(state)
 	if !ok {
+		log.Printf("[spotify] callback: invalid or expired state")
 		http.Error(w, "invalid or expired state", 400)
 		return
 	}
@@ -102,6 +107,7 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 
 	tok, err := postToken(r.Context(), form)
 	if err != nil {
+		log.Printf("[spotify] callback: token exchange: %v", err)
 		http.Error(w, "token exchange failed: "+err.Error(), 500)
 		return
 	}
@@ -109,6 +115,7 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 	// Pull /me for display name + product type
 	me, err := fetchMe(r.Context(), tok.AccessToken)
 	if err != nil {
+		log.Printf("[spotify] callback: fetch /me: %v", err)
 		http.Error(w, "fetch /me failed: "+err.Error(), 500)
 		return
 	}
@@ -126,6 +133,7 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 			display_name=excluded.display_name,
 			product=excluded.product
 	`, tok.AccessToken, tok.RefreshToken, expiresAt, tok.Scope, me.ID, me.DisplayName, me.Product); err != nil {
+		log.Printf("[spotify] callback: insert token: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -144,7 +152,7 @@ func postToken(ctx context.Context, form url.Values) (*tokenResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +181,7 @@ func fetchMe(ctx context.Context, accessToken string) (*spotifyMe, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
