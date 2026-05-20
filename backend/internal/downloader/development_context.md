@@ -1,5 +1,7 @@
 # Downloader Package — Development Context
 
+**Last updated**: 2026-05-19
+
 ## Overview
 
 The `downloader` package integrates multiple download tools (SpotiFLAC, yt-dlp, spotDL) to fetch audio files from Spotify URLs and free-text search queries. It manages job lifecycle, concurrency, logging, and database persistence.
