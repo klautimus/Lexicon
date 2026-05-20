@@ -3,6 +3,7 @@ package history
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -12,6 +13,21 @@ import (
 type API struct{ db *sql.DB }
 
 func New(db *sql.DB) *API { return &API{db: db} }
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[history] writeJSON encode: %v", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": message}); err != nil {
+		log.Printf("[history] writeError encode: %v", err)
+	}
+}
 
 func (a *API) Mount(r chi.Router) {
 	r.Post("/api/history/play", a.recordPlay)
@@ -29,7 +45,8 @@ type playReq struct {
 func (a *API) recordPlay(w http.ResponseWriter, r *http.Request) {
 	var p playReq
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, "bad json", 400)
+		log.Printf("[history] recordPlay decode: %v", err)
+		writeError(w, "bad json", 400)
 		return
 	}
 	if p.StartedAt == 0 {
@@ -37,6 +54,17 @@ func (a *API) recordPlay(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.Source == "" {
 		p.Source = "local"
+	}
+	// Validate track exists before recording play
+	var exists int
+	if err := a.db.QueryRowContext(r.Context(), `SELECT 1 FROM tracks WHERE id=?`, p.TrackID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, "track not found", 404)
+			return
+		}
+		log.Printf("[history] recordPlay track lookup track %d: %v", p.TrackID, err)
+		writeError(w, err.Error(), 500)
+		return
 	}
 	completed := 0
 	if p.Completed {
@@ -46,11 +74,11 @@ func (a *API) recordPlay(w http.ResponseWriter, r *http.Request) {
 		`INSERT INTO plays(track_id,started_at,duration_played_sec,completed,source) VALUES(?,?,?,?,?)`,
 		p.TrackID, p.StartedAt, p.DurationPlayedSec, completed, p.Source)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[history] recordPlay insert track %d: %v", p.TrackID, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"ok":true}`))
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (a *API) recent(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +87,8 @@ func (a *API) recent(w http.ResponseWriter, r *http.Request) {
 		FROM plays p JOIN tracks t ON t.id=p.track_id
 		ORDER BY p.started_at DESC LIMIT 50`)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[history] recent query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -78,14 +107,18 @@ func (a *API) recent(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var x Row
 		var c int
-		rows.Scan(&x.ID, &x.TrackID, &x.Title, &x.Artist, &x.Album, &x.StartedAt, &x.DurationPlayedSec, &c, &x.Source)
+		if err := rows.Scan(&x.ID, &x.TrackID, &x.Title, &x.Artist, &x.Album, &x.StartedAt, &x.DurationPlayedSec, &c, &x.Source); err != nil {
+			log.Printf("[history] recent scan: %v", err)
+			writeError(w, err.Error(), 500)
+			return
+		}
 		x.Completed = c == 1
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[history] recent rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	writeJSON(w, out)
 }

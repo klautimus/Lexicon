@@ -4,10 +4,57 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// validSQLiteTimeModifiers is a whitelist of safe SQLite strftime modifiers
+// for timezone conversion. Never pass user input directly to SQL.
+var validSQLiteTimeModifiers = map[string]bool{
+	"localtime":        true,
+	"utc":              true,
+	"+00:00":           true,
+	"+01:00":           true,
+	"+02:00":           true,
+	"+03:00":           true,
+	"+04:00":           true,
+	"+05:00":           true,
+	"+06:00":           true,
+	"+07:00":           true,
+	"+08:00":           true,
+	"+09:00":           true,
+	"+10:00":           true,
+	"+11:00":           true,
+	"+12:00":           true,
+	"-01:00":           true,
+	"-02:00":           true,
+	"-03:00":           true,
+	"-04:00":           true,
+	"-05:00":           true,
+	"-06:00":           true,
+	"-07:00":           true,
+	"-08:00":           true,
+	"-09:00":           true,
+	"-10:00":           true,
+	"-11:00":           true,
+	"-12:00":           true,
+}
+
+// normalizeTimezone validates and returns a safe SQLite timezone modifier.
+// Falls back to "localtime" if the value is not in the whitelist.
+func normalizeTimezone(tz string) string {
+	tz = strings.TrimSpace(tz)
+	if tz == "local" {
+		tz = "localtime"
+	}
+	if validSQLiteTimeModifiers[tz] {
+		return tz
+	}
+	return "localtime"
+}
 
 type API struct{ db *sql.DB; timezone string }
 
@@ -23,7 +70,9 @@ func (a *API) Mount(r chi.Router) {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[analytics] writeJSON encode: %v", err)
+	}
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +100,7 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 		FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
+		log.Printf("[analytics] topArtists query: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -63,10 +113,15 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 	out := []Row{}
 	for rows.Next() {
 		var x Row
-		rows.Scan(&x.Artist, &x.Plays, &x.ListenSec)
+		if err := rows.Scan(&x.Artist, &x.Plays, &x.ListenSec); err != nil {
+			log.Printf("[analytics] topArtists scan: %v", err)
+			http.Error(w, err.Error(), 500)
+			return
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
+		log.Printf("[analytics] topArtists rows: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -78,6 +133,7 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 		SELECT t.id, t.title, IFNULL(t.artist,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
+		log.Printf("[analytics] topTracks query: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -95,6 +151,7 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
+		log.Printf("[analytics] topTracks rows: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -106,6 +163,7 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`)
 	if err != nil {
+		log.Printf("[analytics] topGenres query: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -121,6 +179,7 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
+		log.Printf("[analytics] topGenres rows: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -128,15 +187,13 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
-	tzMod := a.timezone
-	if tzMod == "local" {
-		tzMod = "localtime"
-	}
+	tzMod := normalizeTimezone(a.timezone)
 	q := fmt.Sprintf(`SELECT CAST(strftime('%%w', started_at, 'unixepoch', '%s') AS INTEGER) AS dow,
 	       CAST(strftime('%%H', started_at, 'unixepoch', '%s') AS INTEGER) AS hour,
 	       COUNT(*) FROM plays GROUP BY dow, hour`, tzMod, tzMod)
 	rows, err := a.db.QueryContext(r.Context(), q)
 	if err != nil {
+		log.Printf("[analytics] heatmap query: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -153,6 +210,7 @@ func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
+		log.Printf("[analytics] heatmap rows: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}

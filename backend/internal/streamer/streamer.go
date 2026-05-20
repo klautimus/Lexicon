@@ -2,16 +2,30 @@ package streamer
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
 
-type Streamer struct{ db *sql.DB }
+type Streamer struct {
+	db     *sql.DB
+	roots  []string
+}
 
-func New(db *sql.DB) *Streamer { return &Streamer{db: db} }
+func New(db *sql.DB, mediaRoots string) *Streamer {
+	var roots []string
+	for _, r := range strings.Split(mediaRoots, ";") {
+		if r = strings.TrimSpace(r); r != "" {
+			roots = append(roots, filepath.Clean(r))
+		}
+	}
+	return &Streamer{db: db, roots: roots}
+}
 
 func (s *Streamer) Mount(r chi.Router) {
 	r.Get("/api/stream/{id}", s.stream)
@@ -19,6 +33,10 @@ func (s *Streamer) Mount(r chi.Router) {
 
 func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Range, Accept-Encoding")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -28,14 +46,35 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 		mime string
 	)
 	if err := s.db.QueryRowContext(r.Context(), `SELECT path, IFNULL(mime,'application/octet-stream') FROM tracks WHERE id=?`, id).Scan(&path, &mime); err != nil {
+		log.Printf("[stream] stream track %d: lookup: %v", id, err)
 		http.Error(w, "not found", 404)
 		return
 	}
+
+	// Path traversal guard: resolved path must stay within a configured media root
+	if len(s.roots) > 0 {
+		clean := filepath.Clean(path)
+		allowed := false
+		for _, root := range s.roots {
+			if strings.HasPrefix(clean, root+string(os.PathSeparator)) || clean == root {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			log.Printf("[stream] stream track %d: path %s not in media roots", id, path)
+			http.Error(w, "forbidden", 403)
+			return
+		}
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			log.Printf("[stream] stream track %d: file not found: %s", id, path)
 			http.Error(w, "file not found", 404)
 		} else {
+			log.Printf("[stream] stream track %d: open %s: %v", id, path, err)
 			http.Error(w, "open", 500)
 		}
 		return
@@ -43,6 +82,7 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	stat, err := f.Stat()
 	if err != nil {
+		log.Printf("[stream] stream track %d: stat %s: %v", id, path, err)
 		http.Error(w, "stat", 500)
 		return
 	}

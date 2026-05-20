@@ -3,8 +3,10 @@ package library
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,9 +14,36 @@ import (
 	"github.com/kevin/lexicon/internal/models"
 )
 
-type API struct{ db *sql.DB }
+type API struct {
+	db         *sql.DB
+	mediaRoots []string
+}
 
-func New(db *sql.DB) *API { return &API{db: db} }
+func New(db *sql.DB, mediaRoots []string) *API {
+	cleaned := make([]string, 0, len(mediaRoots))
+	for _, r := range mediaRoots {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			cleaned = append(cleaned, filepath.Clean(r))
+		}
+	}
+	return &API{db: db, mediaRoots: cleaned}
+}
+
+// isPathSafe returns true if the given path is within one of the configured media roots.
+func (a *API) isPathSafe(path string) bool {
+	if len(a.mediaRoots) == 0 {
+		return true // no roots configured, allow (scanner hasn't run yet)
+	}
+	clean := filepath.Clean(path)
+	sep := string(os.PathSeparator)
+	for _, root := range a.mediaRoots {
+		if strings.HasPrefix(clean, root+sep) || clean == root {
+			return true
+		}
+	}
+	return false
+}
 
 func (a *API) Mount(r chi.Router) {
 	r.Get("/api/library/tracks", a.tracks)
@@ -30,7 +59,17 @@ func (a *API) Mount(r chi.Router) {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[library] writeJSON encode: %v", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": message}); err != nil {
+		log.Printf("[library] writeError encode: %v", err)
+	}
 }
 
 func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +87,11 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 		countQ += ` WHERE media_kind=?`
 		countArgs = append(countArgs, kind)
 	}
-	a.db.QueryRowContext(r.Context(), countQ, countArgs...).Scan(&total)
+	if err := a.db.QueryRowContext(r.Context(), countQ, countArgs...).Scan(&total); err != nil {
+		log.Printf("[library] tracks count: %v", err)
+		writeError(w, err.Error(), 500)
+		return
+	}
 
 	q := `SELECT ` + models.TrackCols + ` FROM tracks`
 	args := []interface{}{}
@@ -60,17 +103,24 @@ func (a *API) tracks(w http.ResponseWriter, r *http.Request) {
 	args = append(args, limit, offset)
 	rows, err := a.db.QueryContext(r.Context(), q, args...)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] tracks query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
 	out := []models.Track{}
 	for rows.Next() {
-		t, _ := models.ScanTrack(rows)
+		t, err := models.ScanTrack(rows)
+		if err != nil {
+			log.Printf("[library] tracks scan: %v", err)
+			writeError(w, err.Error(), 500)
+			return
+		}
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] tracks rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, map[string]interface{}{"tracks": out, "total": total})
@@ -82,7 +132,8 @@ func (a *API) albums(w http.ResponseWriter, r *http.Request) {
 		FROM tracks WHERE media_kind='music' AND IFNULL(album,'')!=''
 		GROUP BY album, artist ORDER BY artist, album`)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] albums query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -95,11 +146,16 @@ func (a *API) albums(w http.ResponseWriter, r *http.Request) {
 	out := []Album{}
 	for rows.Next() {
 		var x Album
-		rows.Scan(&x.Album, &x.Artist, &x.Year, &x.Tracks)
+		if err := rows.Scan(&x.Album, &x.Artist, &x.Year, &x.Tracks); err != nil {
+			log.Printf("[library] albums scan: %v", err)
+			writeError(w, err.Error(), 500)
+			return
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] albums rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, out)
@@ -110,7 +166,8 @@ func (a *API) artists(w http.ResponseWriter, r *http.Request) {
 		SELECT IFNULL(COALESCE(NULLIF(album_artist,''),artist),'') AS artist, COUNT(*) AS tracks, COUNT(DISTINCT album) AS albums
 		FROM tracks WHERE media_kind='music' GROUP BY artist HAVING artist!='' ORDER BY artist`)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] artists query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -122,11 +179,16 @@ func (a *API) artists(w http.ResponseWriter, r *http.Request) {
 	out := []Artist{}
 	for rows.Next() {
 		var x Artist
-		rows.Scan(&x.Artist, &x.Tracks, &x.Albums)
+		if err := rows.Scan(&x.Artist, &x.Tracks, &x.Albums); err != nil {
+			log.Printf("[library] artists scan: %v", err)
+			writeError(w, err.Error(), 500)
+			return
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] artists rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, out)
@@ -137,7 +199,8 @@ func (a *API) podcasts(w http.ResponseWriter, r *http.Request) {
 		SELECT IFNULL(COALESCE(NULLIF(album,''),album_artist,artist),'') AS show, COUNT(*) AS episodes
 		FROM tracks WHERE media_kind='podcast' GROUP BY show HAVING show!='' ORDER BY show`)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] podcasts query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -148,11 +211,16 @@ func (a *API) podcasts(w http.ResponseWriter, r *http.Request) {
 	out := []Show{}
 	for rows.Next() {
 		var x Show
-		rows.Scan(&x.Show, &x.Episodes)
+		if err := rows.Scan(&x.Show, &x.Episodes); err != nil {
+			log.Printf("[library] podcasts scan: %v", err)
+			writeError(w, err.Error(), 500)
+			return
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] podcasts rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, out)
@@ -162,6 +230,10 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
 		writeJSON(w, []models.Track{})
+		return
+	}
+	if len(q) > 256 {
+		writeError(w, "query must be 256 characters or fewer", 400)
 		return
 	}
 	// FTS5: quote terms with AND
@@ -175,17 +247,24 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		FROM tracks_fts f JOIN tracks t ON t.id=f.rowid
 		WHERE tracks_fts MATCH ? ORDER BY rank LIMIT 100`, ftsQ)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] search fts query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
 	out := []models.Track{}
 	for rows.Next() {
-		t, _ := models.ScanTrack(rows)
+		t, err := models.ScanTrack(rows)
+		if err != nil {
+			log.Printf("[library] search scan: %v", err)
+			writeError(w, err.Error(), 500)
+			return
+		}
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[library] search rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, out)
@@ -196,7 +275,8 @@ func (a *API) track(w http.ResponseWriter, r *http.Request) {
 	row := a.db.QueryRowContext(r.Context(), `SELECT `+models.TrackCols+` FROM tracks WHERE id=?`, id)
 	t, err := models.ScanTrack(row)
 	if err != nil {
-		http.Error(w, "not found", 404)
+		log.Printf("[library] track get id %d: %v", id, err)
+		writeError(w, "not found", 404)
 		return
 	}
 	writeJSON(w, t)
@@ -205,19 +285,46 @@ func (a *API) track(w http.ResponseWriter, r *http.Request) {
 func (a *API) deleteTrack(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if id <= 0 {
-		http.Error(w, "invalid id", 400)
+		writeError(w, "invalid id", 400)
 		return
 	}
 	var path string
 	if err := a.db.QueryRowContext(r.Context(), `SELECT path FROM tracks WHERE id=?`, id).Scan(&path); err != nil {
-		http.Error(w, "not found", 404)
+		log.Printf("[library] deleteTrack lookup id %d: %v", id, err)
+		writeError(w, "not found", 404)
+		return
+	}
+	if !a.isPathSafe(path) {
+		log.Printf("[library] deleteTrack path unsafe id %d path %s", id, path)
+		writeError(w, "forbidden", 403)
+		return
+	}
+	// Wrap both DB delete and file removal in a transaction so they
+	// succeed or fail together. If the file delete fails the DB change
+	// is rolled back and the operation can be retried.
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("[library] deleteTrack beginTx id %d: %v", id, err)
+		writeError(w, "delete failed", 500)
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM tracks WHERE id=?`, id); err != nil {
+		tx.Rollback()
+		log.Printf("[library] deleteTrack exec id %d: %v", id, err)
+		writeError(w, "delete failed", 500)
 		return
 	}
 	if path != "" {
-		os.Remove(path)
+		if err := os.Remove(path); err != nil {
+			tx.Rollback()
+			log.Printf("[library] deleteTrack remove id %d path %s: %v", id, path, err)
+			writeError(w, "delete failed", 500)
+			return
+		}
 	}
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM tracks WHERE id=?`, id); err != nil {
-		http.Error(w, "delete failed", 500)
+	if err := tx.Commit(); err != nil {
+		log.Printf("[library] deleteTrack commit id %d: %v", id, err)
+		writeError(w, "delete failed", 500)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
@@ -227,19 +334,26 @@ func (a *API) cover(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	var path string
 	if err := a.db.QueryRowContext(r.Context(), `SELECT path FROM tracks WHERE id=?`, id).Scan(&path); err != nil {
-		http.Error(w, "not found", 404)
+		log.Printf("[library] cover lookup id %d: %v", id, err)
+		writeError(w, "not found", 404)
 		return
 	}
 	// Read embedded art via dhowden/tag
+	if !a.isPathSafe(path) {
+		log.Printf("[library] cover path unsafe id %d path %s", id, path)
+		writeError(w, "forbidden", 403)
+		return
+	}
 	f, err := openReader(path)
 	if err != nil {
-		http.Error(w, "", 404)
+		log.Printf("[library] cover open id %d path %s: %v", id, path, err)
+		writeError(w, "", 404)
 		return
 	}
 	defer f.Close()
 	pic := readCover(f)
 	if pic == nil {
-		http.Error(w, "no cover", 404)
+		writeError(w, "no cover", 404)
 		return
 	}
 	w.Header().Set("Content-Type", pic.MIMEType)
@@ -255,9 +369,25 @@ func (a *API) stats(w http.ResponseWriter, r *http.Request) {
 		Podcasts int `json:"podcasts"`
 	}
 	var s Stats
-	a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tracks WHERE media_kind='music'`).Scan(&s.Tracks)
-	a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT album) FROM tracks WHERE media_kind='music' AND IFNULL(album,'')!=''`).Scan(&s.Albums)
-	a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT COALESCE(NULLIF(album_artist,''),artist)) FROM tracks WHERE media_kind='music'`).Scan(&s.Artists)
-	a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT COALESCE(NULLIF(album,''),album_artist,artist)) FROM tracks WHERE media_kind='podcast'`).Scan(&s.Podcasts)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM tracks WHERE media_kind='music'`).Scan(&s.Tracks); err != nil {
+		log.Printf("[library] stats tracks: %v", err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT album) FROM tracks WHERE media_kind='music' AND IFNULL(album,'')!=''`).Scan(&s.Albums); err != nil {
+		log.Printf("[library] stats albums: %v", err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT COALESCE(NULLIF(album_artist,''),artist)) FROM tracks WHERE media_kind='music'`).Scan(&s.Artists); err != nil {
+		log.Printf("[library] stats artists: %v", err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT COALESCE(NULLIF(album,''),album_artist,artist)) FROM tracks WHERE media_kind='podcast'`).Scan(&s.Podcasts); err != nil {
+		log.Printf("[library] stats podcasts: %v", err)
+		writeError(w, err.Error(), 500)
+		return
+	}
 	writeJSON(w, s)
 }
