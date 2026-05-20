@@ -56,7 +56,7 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -Command ""Start-Process '{app}\{#MyAppExeName}' -WorkingDirectory '{app}'; $port = {code:GetFrontendPort}; $url = 'http://localhost:' + $port; $maxRetries = 30; $retries = 0; while ($retries -lt $maxRetries) {{ try {{ $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; if ($r.StatusCode -eq 200) {{ break }} }} catch {{ }}; Start-Sleep -Seconds 1; $retries++ }}; Start-Process $url"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -Command ""Start-Process '{app}\{#MyAppExeName}' -WorkingDirectory '{app}'; $$port = {code:GetFrontendPort}; $$url = 'http://localhost:' + $$port; $$maxRetries = 30; $$retries = 0; while ($$retries -lt $$maxRetries) {{ try {{ $$r = Invoke-WebRequest -Uri $$url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; if ($$r.StatusCode -eq 200) {{ break }} }} catch {{ }}; Start-Sleep -Seconds 1; $$retries++ }}; Start-Process $$url"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var
