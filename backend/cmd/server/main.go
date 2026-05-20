@@ -186,6 +186,12 @@ func main() {
 			}
 		}
 	}
+	// Auto-detect ffprobe from ffmpeg path if not explicitly set
+	ffprobeBin := cfg.FfprobeBin
+	if ffprobeBin == "" && cfg.FfmpegBin != "" {
+		ffprobeBin = strings.Replace(cfg.FfmpegBin, "ffmpeg.exe", "ffprobe.exe", 1)
+	}
+
 	dlAPI := downloader.New(downloader.Config{
 		Bin:                 cfg.SpotiflacBin,
 		Output:              dlOutput,
@@ -198,6 +204,7 @@ func main() {
 		YtdlpBin:            cfg.YtdlpBin,
 		YtdlpFormat:         cfg.YtdlpFormat,
 		FfmpegBin:           cfg.FfmpegBin,
+		FfprobeBin:          ffprobeBin,
 		DeepSeekAPIKey:      cfg.DeepSeekAPIKey,
 		DeepSeekModel:       cfg.DeepSeekModel,
 		DeepSeekThinking:    cfg.DeepSeekThinking,
