@@ -24,6 +24,7 @@ function Step($msg) {
 # 1. Build frontend
 Step "Building frontend..."
 Set-Location $frontend
+if ($PWD.Path -ne (Resolve-Path $frontend).Path) { throw "Set-Location failed: expected $frontend, got $PWD" }
 
 # npm has a known bug (#4828) where optional platform-specific
 # dependencies (@rollup/rollup-*) don't resolve on the first install
@@ -65,6 +66,7 @@ Copy-Item -Recurse (Join-Path $frontend "dist") $embedDist
 # 3. Build Go binary
 Step "Building Go backend (single binary with embedded frontend)..."
 Set-Location $backend
+if ($PWD.Path -ne (Resolve-Path $backend).Path) { throw "Set-Location failed: expected $backend, got $PWD" }
 $binary = Join-Path $release "lexicon.exe"
 go clean -cache
 go build -ldflags "-s -w" -o $binary ./cmd/server
@@ -93,12 +95,18 @@ if (-not (Test-Path $ytDlpDest)) {
     Write-Host "Downloading yt-dlp.exe..."
     try {
         Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile $ytDlpDest -UseBasicParsing
-        Write-Host "Downloaded yt-dlp.exe"
     } catch {
-        Write-Warning "Failed to download yt-dlp.exe: $_"
+        throw "Failed to download yt-dlp.exe: $_"
     }
+}
+if (Test-Path $ytDlpDest) {
+    $ytDlpSize = (Get-Item $ytDlpDest).Length
+    if ($ytDlpSize -lt 1MB) {
+        throw "yt-dlp.exe is only $ytDlpSize bytes — download is corrupt or incomplete"
+    }
+    Write-Host "Bundled yt-dlp.exe ($([math]::Round($ytDlpSize / 1MB, 1)) MB)"
 } else {
-    Write-Host "Bundled yt-dlp.exe"
+    throw "yt-dlp.exe is missing after download attempt"
 }
 
 # Download spotdl.exe if missing
@@ -110,15 +118,21 @@ if (-not (Test-Path $spotdlDest)) {
         $asset = $releaseInfo.assets | Where-Object { $_.name -like "*win32.exe" } | Select-Object -First 1
         if ($asset) {
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $spotdlDest -UseBasicParsing
-            Write-Host "Downloaded spotdl.exe ($($asset.name))"
         } else {
-            Write-Warning "No win32.exe asset found in latest SpotDL release"
+            throw "No win32.exe asset found in latest SpotDL release"
         }
     } catch {
-        Write-Warning "Failed to download spotdl.exe: $_"
+        throw "Failed to download spotdl.exe: $_"
     }
+}
+if (Test-Path $spotdlDest) {
+    $spotdlSize = (Get-Item $spotdlDest).Length
+    if ($spotdlSize -lt 100KB) {
+        throw "spotdl.exe is only $spotdlSize bytes — download is corrupt or incomplete"
+    }
+    Write-Host "Bundled spotdl.exe ($([math]::Round($spotdlSize / 1KB, 0)) KB)"
 } else {
-    Write-Host "Bundled spotdl.exe"
+    throw "spotdl.exe is missing after download attempt"
 }
 
 # Try to find and copy ngrok.exe (skip Windows App aliases which are 0-byte stubs)
@@ -174,12 +188,17 @@ if (-not (Test-Path $ffmpegDest)) {
 }
 # Ensure ffprobe.exe is bundled alongside ffmpeg.exe
 if ((Test-Path $ffmpegDest) -and (-not (Test-Path $ffprobeDest))) {
-    $ffprobeSrc = Join-Path (Split-Path $ffmpegDest) "ffprobe.exe"
-    if (Test-Path $ffprobeSrc) {
+    # Try to find ffprobe next to the ffmpeg source first, then fall back to PATH
+    $ffmpegSrcDir = Split-Path $ffmpegDest
+    $ffprobeSrc = Join-Path $ffmpegSrcDir "ffprobe.exe"
+    if (-not (Test-Path $ffprobeSrc)) {
+        $ffprobeSrc = (Get-Command ffprobe -ErrorAction SilentlyContinue).Source
+    }
+    if ($ffprobeSrc) {
         Copy-Item $ffprobeSrc $ffprobeDest
         Write-Host "Bundled ffprobe.exe"
     } else {
-        Write-Warning "ffprobe.exe not found next to ffmpeg.exe. Download from https://www.gyan.dev/ffmpeg/builds/"
+        Write-Warning "ffprobe.exe not found. Download from https://www.gyan.dev/ffmpeg/builds/"
     }
 }
 
@@ -193,11 +212,12 @@ $icon512 = Join-Path $release "icon-512.png"
 if (-not (Test-Path $iconIco)) {
     Write-Host "Generating icon files..."
     python3 (Join-Path $release "gen_icon.py")
+    if ($LASTEXITCODE -ne 0) { throw "gen_icon.py failed (exit code $LASTEXITCODE)" }
 }
 if (Test-Path $iconIco) {
     Write-Host "Icon files ready: lexicon.ico, icon.svg, icon-192.png, icon-512.png"
 } else {
-    Write-Warning "Icon generation failed. Installer will use default icon."
+    throw "lexicon.ico not found after icon generation. Installer requires this file."
 }
 
 # 5. Compile Inno Setup installer

@@ -47,6 +47,7 @@ Source: "tools\poddl.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifso
 
 [Dirs]
 Name: "{app}\data"; Permissions: everyone-modify
+Name: "{app}\tools"; Permissions: everyone-modify
 Name: "{app}\podcasts"; Permissions: everyone-modify
 
 [Icons]
@@ -55,7 +56,7 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -Command ""Start-Process '{app}\{#MyAppExeName}' -WorkingDirectory '{app}'; Start-Sleep -Seconds 2; Start-Process 'http://localhost:{code:GetFrontendPort}'"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "powershell.exe"; Parameters: "-WindowStyle Hidden -Command ""Start-Process '{app}\{#MyAppExeName}' -WorkingDirectory '{app}'; $port = {code:GetFrontendPort}; $url = 'http://localhost:' + $port; $maxRetries = 30; $retries = 0; while ($retries -lt $maxRetries) {{ try {{ $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; if ($r.StatusCode -eq 200) {{ break }} }} catch {{ }}; Start-Sleep -Seconds 1; $retries++ }}; Start-Process $url"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var
@@ -253,6 +254,15 @@ begin
   end;
 end;
 
+// Helper: convert backslashes to forward slashes for .env paths
+function FwdSlash(const s: String): String;
+var
+  tmp: String;
+begin
+  tmp := s;
+  StringChangeEx(tmp, '\\', '/', True);
+  Result := tmp;
+end;
 // Write .env file after installation
 procedure CurStepChanged(CurStep: TSetupStep);
 var
@@ -261,10 +271,10 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
-    envPath := ExpandConstant('{app}\.env');
+    envPath := FwdSlash(ExpandConstant('{app}\.env'));
     envContent :=
       'PORT=' + BackendPortEdit.Text + #13#10 +
-      'DB_PATH=.\data\lexicon.db' + #13#10 +
+      'DB_PATH=./data/lexicon.db' + #13#10 +
       'MEDIA_ROOTS=' + MediaRootsEdit.Text + #13#10 +
       'DEEPSEEK_API_KEY=' + ApiKeyEdit.Text + #13#10 +
       'DEEPSEEK_MODEL=deepseek-v4-flash' + #13#10 +
@@ -280,20 +290,20 @@ begin
 
     // Bundled tool paths (always write — tools are bundled with the installer)
     if FileExists(ExpandConstant('{app}\tools\spotiflac.exe')) then
-      envContent := envContent + 'SPOTIFLAC_BIN=' + ExpandConstant('{app}\tools\spotiflac.exe') + #13#10;
+      envContent := envContent + 'SPOTIFLAC_BIN=' + FwdSlash(ExpandConstant('{app}\tools\spotiflac.exe')) + #13#10;
     if FileExists(ExpandConstant('{app}\tools\spotdl.exe')) then
-      envContent := envContent + 'SPOTDL_BIN=' + ExpandConstant('{app}\tools\spotdl.exe') + #13#10;
+      envContent := envContent + 'SPOTDL_BIN=' + FwdSlash(ExpandConstant('{app}\tools\spotdl.exe')) + #13#10;
     if FileExists(ExpandConstant('{app}\tools\yt-dlp.exe')) then
-      envContent := envContent + 'YTDLP_BIN=' + ExpandConstant('{app}\tools\yt-dlp.exe') + #13#10;
+      envContent := envContent + 'YTDLP_BIN=' + FwdSlash(ExpandConstant('{app}\tools\yt-dlp.exe')) + #13#10;
     if FileExists(ExpandConstant('{app}\tools\ffmpeg.exe')) then
-      envContent := envContent + 'FFMPEG_BIN=' + ExpandConstant('{app}\tools\ffmpeg.exe') + #13#10;
+      envContent := envContent + 'FFMPEG_BIN=' + FwdSlash(ExpandConstant('{app}\tools\ffmpeg.exe')) + #13#10;
     if FileExists(ExpandConstant('{app}\tools\ffprobe.exe')) then
-      envContent := envContent + 'FFPROBE_BIN=' + ExpandConstant('{app}\tools\ffprobe.exe') + #13#10;
+      envContent := envContent + 'FFPROBE_BIN=' + FwdSlash(ExpandConstant('{app}\tools\ffprobe.exe')) + #13#10;
     if FileExists(ExpandConstant('{app}\tools\ngrok.exe')) then
-      envContent := envContent + 'NGROK_BIN=' + ExpandConstant('{app}\tools\ngrok.exe') + #13#10;
+      envContent := envContent + 'NGROK_BIN=' + FwdSlash(ExpandConstant('{app}\tools\ngrok.exe')) + #13#10;
     if FileExists(ExpandConstant('{app}\tools\poddl.exe')) then
-      envContent := envContent + 'PODDL_BIN=' + ExpandConstant('{app}\tools\poddl.exe') + #13#10;
-    envContent := envContent + 'PODCAST_DIR=' + ExpandConstant('{app}\podcasts') + #13#10;
+      envContent := envContent + 'PODDL_BIN=' + FwdSlash(ExpandConstant('{app}\tools\poddl.exe')) + #13#10;
+    envContent := envContent + 'PODCAST_DIR=' + FwdSlash(ExpandConstant('{app}\podcasts')) + #13#10;
 
     SaveStringToFile(envPath, envContent, False);
     FrontendPort := FrontendPortEdit.Text;
@@ -306,5 +316,34 @@ begin
   Result := FrontendPort;
 end;
 
-// Note: untracked files (.env, data/lexicon.db) are preserved automatically
-// because they are created at runtime and not listed in [Files].
+// Prompt to remove user data during uninstall
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  dataPath: String;
+  podcastsPath: String;
+  envPath: String;
+  msg: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    msg := 'Do you also want to remove your Lexicon data?' + #13#10 + #13#10 +
+           'This will delete:' + #13#10 +
+           '  - Database (data\lexicon.db)' + #13#10 +
+           '  - Podcasts folder' + #13#10 +
+           '  - Configuration (.env)' + #13#10 + #13#10 +
+           'Choose Yes to remove all data, No to keep it.';
+    if MsgBox(msg, mbConfirmation, MB_YESNO) = IDYES then
+    begin
+      dataPath := ExpandConstant('{app}\data');
+      podcastsPath := ExpandConstant('{app}\podcasts');
+      envPath := ExpandConstant('{app}\.env');
+
+      if DirExists(dataPath) then
+        DelTree(dataPath, True, True, True);
+      if DirExists(podcastsPath) then
+        DelTree(podcastsPath, True, True, True);
+      if FileExists(envPath) then
+        DeleteFile(envPath);
+    end;
+  end;
+end;

@@ -35,6 +35,7 @@ interface PlayerState {
   error: string | null;
   shuffled: boolean;
   repeatMode: RepeatMode;
+  loading: boolean;
 }
 
 interface PlayerCtx extends PlayerState {
@@ -67,6 +68,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     error: null,
     shuffled: false,
     repeatMode: "off",
+    loading: false,
   });
   const playStartRef = useRef<number>(0);
   const playSecondsRef = useRef<number>(0);
@@ -79,9 +81,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const playSessionRef = useRef<number>(0);
   const podcastEpisodeIdRef = useRef<number | null>(null);
   const podcastSaveIntervalRef = useRef<number | null>(null);
+  const volumeRef = useRef<number>(0.9);
   const toast = useToast();
   const wsRef = useRef<ReturnType<typeof getPlayerWebSocket> | null>(null);
   const isWsPlayerRef = useRef<boolean>(false);
+  // Cache the Spotify player promise so we don't re-init on every poll tick
+  const spotifyPlayerPromiseRef = useRef<ReturnType<typeof getSpotifyPlayer> | null>(null);
 
   // ----- Helpers -----
 
@@ -92,28 +97,286 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const flushLocalPlay = useCallback((completed: boolean) => {
+    const t = currentRef.current;
+    if (!t || sourceRef.current !== "local") return;
+    const dur = Math.max(0, Math.floor(playSecondsRef.current));
+    if (dur < 5 && !completed) return;
+    api
+      .recordPlay({
+        track_id: t.id,
+        duration_played_sec: dur,
+        completed,
+        started_at: playStartRef.current,
+      })
+      .catch(() => {});
+    playSecondsRef.current = 0;
+  }, []);
+
+  // ----- Web Audio API: Dynamics Compressor -----
+  const initAudioPipeline = useCallback(() => {
+    const a = audioRef.current;
+    if (!a || audioCtxRef.current) return;
+    try {
+      const ctx = new AudioContext();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaElementSource(a);
+      const compressor = ctx.createDynamicsCompressor();
+      compressor.threshold.value = -24;
+      compressor.knee.value = 30;
+      compressor.ratio.value = 12;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+      compressorRef.current = compressor;
+      source.connect(compressor);
+      compressor.connect(ctx.destination);
+    } catch (e) {
+      console.warn("[player] Web Audio API init failed:", e);
+    }
+  }, []);
+
+  // ----- Core playback logic (useCallback so effects get stable refs) -----
+
+  const loadAndPlay = useCallback(async (t: Track) => {
+    clearSkipTimeout();
+    playSessionRef.current++;
+    consecutiveErrorsRef.current = 0;
+
+    flushLocalPlay(false);
+    currentRef.current = t;
+    setState((s) => ({ ...s, error: null, loading: true }));
+
+    const isSpotify = !!t.spotify_id;
+
+    if (isSpotify) {
+      const a = audioRef.current;
+      if (a) {
+        a.pause();
+        a.removeAttribute("src");
+        a.load();
+      }
+
+      sourceRef.current = "spotify";
+      setState((s) => ({ ...s, source: "spotify" }));
+
+      const uri = spotifyURIFromTrack(t);
+      if (!uri) {
+        setState((s) => ({ ...s, error: "No Spotify URI", loading: false }));
+        return;
+      }
+      try {
+        await spotifyPlayURI(uri);
+        setState((s) => ({ ...s, loading: false }));
+      } catch (e: any) {
+        const msg = e?.message || "Spotify playback failed";
+        setState((s) => ({
+          ...s,
+          error: msg.includes("403")
+            ? "Spotify Premium required to play in-app."
+            : msg,
+          loading: false,
+        }));
+      }
+      return;
+    }
+
+    // Local file
+    const a = audioRef.current!;
+    a.pause();
+    initAudioPipeline();
+    a.src = api.streamUrl(t.id);
+    a.play()
+      .then(() => {
+        sourceRef.current = "local";
+        setState((s) => ({ ...s, source: "local", error: null, loading: false }));
+        playStartRef.current = Math.floor(Date.now() / 1000);
+        playSecondsRef.current = 0;
+        consecutiveErrorsRef.current = 0;
+        if (t.loudness_integrated != null) {
+          const targetLUFS = -14;
+          const gainDB = targetLUFS - t.loudness_integrated;
+          const gainLinear = Math.pow(10, gainDB / 20);
+          a.volume = Math.min(1.0, volumeRef.current * gainLinear);
+        }
+      })
+      .catch((e: any) => {
+        const msg = e?.message || "Audio playback failed";
+        console.error("[player] play failed:", msg);
+        sourceRef.current = null;
+        currentRef.current = null;
+        setState((s) => ({ ...s, source: null, error: msg, playing: false, loading: false }));
+        consecutiveErrorsRef.current++;
+        if (consecutiveErrorsRef.current >= 5) {
+          toast.error("Multiple tracks failed to play — stopping playback");
+          consecutiveErrorsRef.current = 0;
+          return;
+        }
+        toast.error("Failed to play track — skipping to next");
+        scheduleSkip();
+      });
+  }, [clearSkipTimeout, flushLocalPlay, initAudioPipeline]);
+
+  const goNext = useCallback(() => {
+    clearSkipTimeout();
+    setState((s) => {
+      if (s.repeatMode === "one" && s.current) {
+        loadAndPlay(s.current);
+        return s;
+      }
+
+      const ni = s.index + 1;
+      if (ni >= s.queue.length) {
+        if (s.repeatMode === "all" && s.queue.length > 0) {
+          const first = s.queue[0];
+          if (s.shuffled && s.queue.length > 1) {
+            const newQueue = shuffleArray(s.queue);
+            loadAndPlay(newQueue[0]);
+            return { ...s, queue: newQueue, index: 0, current: newQueue[0] };
+          }
+          loadAndPlay(first);
+          return { ...s, index: 0, current: first };
+        }
+        if (sourceRef.current === "local") {
+          const a = audioRef.current;
+          if (a) a.pause();
+        } else if (sourceRef.current === "spotify") {
+          spotifyPause().catch(() => {});
+        }
+        return { ...s, playing: false };
+      }
+      const nt = s.queue[ni];
+      loadAndPlay(nt);
+      return { ...s, index: ni, current: nt };
+    });
+  }, [clearSkipTimeout, loadAndPlay]);
+
   const scheduleSkip = useCallback(() => {
     clearSkipTimeout();
     skipTimeoutRef.current = window.setTimeout(() => {
       skipTimeoutRef.current = null;
       goNext();
     }, 1500);
-  }, [clearSkipTimeout]);
+  }, [clearSkipTimeout, goNext]);
 
-  // ----- WebSocket setup -----
+  const next = useCallback(() => {
+    flushLocalPlay(false);
+    goNext();
+  }, [flushLocalPlay, goNext]);
+
+  const prev = useCallback(() => {
+    flushLocalPlay(false);
+    setState((s) => {
+      const ni = Math.max(0, s.index - 1);
+      const nt = s.queue[ni];
+      if (nt) loadAndPlay(nt);
+      return { ...s, index: ni, current: nt };
+    });
+  }, [flushLocalPlay, loadAndPlay]);
+
+  const seekFn = useCallback((sec: number) => {
+    if (sourceRef.current === "spotify") {
+      spotifySeek(sec * 1000).catch(() => {});
+      return;
+    }
+    const a = audioRef.current;
+    if (a) a.currentTime = sec;
+  }, []);
+
+  const toggleFn = useCallback(async () => {
+    if (sourceRef.current === "spotify") {
+      try {
+        await spotifyToggle();
+      } catch {}
+      return;
+    }
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) a.play();
+    else a.pause();
+  }, []);
+
+  // ----- Podcast playback position tracking -----
+
+  const clearPodcastSaveInterval = useCallback(() => {
+    if (podcastSaveIntervalRef.current !== null) {
+      clearInterval(podcastSaveIntervalRef.current);
+      podcastSaveIntervalRef.current = null;
+    }
+  }, []);
+
+  const savePodcastPosition = useCallback(async () => {
+    if (podcastEpisodeIdRef.current === null) return;
+    const a = audioRef.current;
+    if (!a) return;
+    const pos = Math.floor(a.currentTime);
+    if (pos <= 0) return;
+    const completed = a.ended || (a.duration > 0 && a.currentTime >= a.duration - 1);
+    try {
+      await api.savePodcastEpisodePosition(podcastEpisodeIdRef.current, pos, completed);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setPodcastEpisodeIdCb = useCallback(async (episodeId: number | null) => {
+    if (podcastEpisodeIdRef.current !== null && podcastEpisodeIdRef.current !== episodeId) {
+      await savePodcastPosition();
+    }
+    clearPodcastSaveInterval();
+    podcastEpisodeIdRef.current = episodeId;
+    if (episodeId !== null) {
+      podcastSaveIntervalRef.current = window.setInterval(() => {
+        savePodcastPosition();
+      }, 5000);
+    }
+  }, [savePodcastPosition, clearPodcastSaveInterval]);
+
+  const playFn = useCallback(async (tracks: Track[], startIndex = 0) => {
+    if (tracks.length === 0) return;
+    clearSkipTimeout();
+    consecutiveErrorsRef.current = 0;
+    if (podcastEpisodeIdRef.current !== null) {
+      await savePodcastPosition();
+      await setPodcastEpisodeIdCb(null);
+    }
+    originalQueueRef.current = [...tracks];
+    const chosen = tracks[startIndex];
+    if (shuffledRef.current && tracks.length > 1) {
+      const rest = tracks.filter((_, i) => i !== startIndex);
+      const shuffled = shuffleArray(rest);
+      const newQueue = [chosen, ...shuffled];
+      setState((s) => ({
+        ...s,
+        queue: newQueue,
+        index: 0,
+        current: chosen,
+        shuffled: true,
+      }));
+      loadAndPlay(chosen);
+    } else {
+      setState((s) => ({
+        ...s,
+        queue: tracks,
+        index: startIndex,
+        current: chosen,
+        shuffled: false,
+      }));
+      loadAndPlay(chosen);
+    }
+  }, [clearSkipTimeout, loadAndPlay, setPodcastEpisodeIdCb]);
+
+  // ----- WebSocket setup (stable callbacks, proper deps) -----
   useEffect(() => {
     const ws = getPlayerWebSocket();
     wsRef.current = ws;
     isWsPlayerRef.current = ws.isPlayer();
     ws.connect();
 
-    // If we're the player, listen for commands from controllers
     ws.onState((msg: any) => {
       if (!isWsPlayerRef.current) return;
       if (msg.type === "play" && msg.track_id) {
-        // Find the track in the queue or fetch it
         api.track(msg.track_id).then((t) => {
-          play([t], 0);
+          playFn([t], 0);
         }).catch(() => {});
       } else if (msg.type === "pause") {
         const a = audioRef.current;
@@ -126,9 +389,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else if (msg.type === "prev") {
         prev();
       } else if (msg.type === "seek" && msg.position !== undefined) {
-        seek(msg.position);
+        seekFn(msg.position);
       } else if (msg.type === "transfer") {
-        // Another device is taking over — pause local playback
         const a = audioRef.current;
         if (a) a.pause();
         isWsPlayerRef.current = false;
@@ -138,31 +400,41 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => {
       ws.disconnect();
     };
-  }, []);
+  }, [playFn, next, prev, seekFn]);
 
-  // Broadcast state changes to controllers when we're the player
+  // Keep a ref to the latest state so broadcastState doesn't need to be
+  // recreated on every tick of the Spotify poller (which sets state every 1s).
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  // Broadcast state changes to controllers when we're the player.
+  // Stable callback (empty deps) — reads latest state from ref.
   const broadcastState = useCallback(() => {
     if (!isWsPlayerRef.current || !wsRef.current) return;
+    const s = stateRef.current;
     wsRef.current.send({
       type: "state",
-      playing: state.playing,
-      track: state.current,
-      position: state.position,
-      duration: state.duration,
+      playing: s.playing,
+      track: s.current,
+      position: s.position,
+      duration: s.duration,
       device: "host",
     });
-  }, [state.playing, state.current, state.position, state.duration]);
+  }, []);
+
+  useEffect(() => {
+    broadcastState();
+  }, [broadcastState]);
 
   // ----- Local <audio> setup -----
   useEffect(() => {
     const a = new Audio();
     a.preload = "auto";
     a.crossOrigin = "anonymous";
-    // playsInline / webkit-playsinline — needed for iOS Safari inline playback
     a.setAttribute("playsinline", "playsinline");
     a.setAttribute("webkit-playsinline", "webkit-playsinline");
     audioRef.current = a;
-    a.volume = state.volume;
+    a.volume = volumeRef.current;
     const onTime = () =>
       setState((s) =>
         s.source === "local"
@@ -189,8 +461,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       playSecondsRef.current = 0;
       setState((s) => ({ ...s, source: null, error: msg, playing: false }));
 
-      // Auto-skip to next track (with consecutive error limit)
-      // Only handle if we're still in the same play session
       consecutiveErrorsRef.current++;
       if (consecutiveErrorsRef.current >= 5) {
         toast.error("Multiple tracks failed to play — stopping playback");
@@ -213,52 +483,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       a.removeEventListener("pause", onPause);
       a.removeEventListener("error", onError);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ----- Web Audio API: Dynamics Compressor -----
-  // Must be initialized after user gesture (browser autoplay policy)
-  const initAudioPipeline = useCallback(() => {
-    const a = audioRef.current;
-    if (!a || audioCtxRef.current) return; // already initialized
-    try {
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-      const source = ctx.createMediaElementSource(a);
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = -24;
-      compressor.knee.value = 30;
-      compressor.ratio.value = 12;
-      compressor.attack.value = 0.003;
-      compressor.release.value = 0.25;
-      compressorRef.current = compressor;
-      source.connect(compressor);
-      compressor.connect(ctx.destination);
-    } catch (e) {
-      console.warn("[player] Web Audio API init failed:", e);
-    }
-  }, []);
-
-  function flushLocalPlay(completed: boolean) {
-    const t = currentRef.current;
-    if (!t || sourceRef.current !== "local") return;
-    const dur = Math.max(0, Math.floor(playSecondsRef.current));
-    if (dur < 5 && !completed) return;
-    api
-      .recordPlay({
-        track_id: t.id,
-        duration_played_sec: dur,
-        completed,
-        started_at: playStartRef.current,
-      })
-      .catch(() => {});
-    playSecondsRef.current = 0;
-  }
-
-  // Broadcast state to controllers whenever it changes
-  useEffect(() => {
-    broadcastState();
-  }, [state.playing, state.position, state.current, broadcastState]);
+  }, [flushLocalPlay, goNext, scheduleSkip]);
 
   // ----- Track local listening time -----
   useEffect(() => {
@@ -288,7 +513,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const id = setInterval(async () => {
       if (sourceRef.current !== "spotify" || cancelled) return;
       try {
-        const { player } = await getSpotifyPlayer();
+        // Cache the player promise so we don't re-init SDK on every tick
+        if (!spotifyPlayerPromiseRef.current) {
+          spotifyPlayerPromiseRef.current = getSpotifyPlayer();
+        }
+        const { player } = await spotifyPlayerPromiseRef.current;
         const st = await player.getCurrentState();
         if (!st) return;
         setState((s) => ({
@@ -297,9 +526,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           position: st.position / 1000,
           duration: st.duration / 1000,
         }));
-        if (st.paused && st.position === 0 && st.track_window?.current_track) {
-          // possible track-end → advance
-        }
       } catch {
         // ignore
       }
@@ -310,92 +536,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  async function loadAndPlay(t: Track) {
-    // Clear any pending skip timeout from a previous track
-    clearSkipTimeout();
-    // Increment play session so stale error handlers are ignored
-    playSessionRef.current++;
-    // Reset consecutive errors for the new track
-    consecutiveErrorsRef.current = 0;
-
-    flushLocalPlay(false);
-    currentRef.current = t;
-    setState((s) => ({ ...s, error: null }));
-
-    const isSpotify = !!t.spotify_id;
-
-    if (isSpotify) {
-      // Stop local audio
-      const a = audioRef.current;
-      if (a) {
-        a.pause();
-        a.removeAttribute("src");
-        a.load();
-      }
-
-      sourceRef.current = "spotify";
-      setState((s) => ({ ...s, source: "spotify" }));
-
-      const uri = spotifyURIFromTrack(t);
-      if (!uri) {
-        setState((s) => ({ ...s, error: "No Spotify URI" }));
-        return;
-      }
-      try {
-        await spotifyPlayURI(uri);
-      } catch (e: any) {
-        const msg = e?.message || "Spotify playback failed";
-        setState((s) => ({
-          ...s,
-          error: msg.includes("403")
-            ? "Spotify Premium required to play in-app."
-            : msg,
-        }));
-      }
-      return;
-    }
-
-    // Local file
-    const a = audioRef.current!;
-    // Pause and reset before changing source to prevent ghost playback
-    a.pause();
-    // Initialize Web Audio API compressor on first user interaction
-    initAudioPipeline();
-    a.src = api.streamUrl(t.id);
-    a.play()
-      .then(() => {
-        sourceRef.current = "local";
-        setState((s) => ({ ...s, source: "local", error: null }));
-        playStartRef.current = Math.floor(Date.now() / 1000);
-        playSecondsRef.current = 0;
-        consecutiveErrorsRef.current = 0;
-        // Volume normalization: adjust to -14 LUFS target
-        if (t.loudness_integrated != null) {
-          const targetLUFS = -14;
-          const gainDB = targetLUFS - t.loudness_integrated;
-          const gainLinear = Math.pow(10, gainDB / 20);
-          a.volume = Math.min(1.0, state.volume * gainLinear);
-        }
-      })
-      .catch((e: any) => {
-        const msg = e?.message || "Audio playback failed";
-        console.error("[player] play failed:", msg);
-        sourceRef.current = null;
-        currentRef.current = null;
-        setState((s) => ({ ...s, source: null, error: msg, playing: false }));
-
-        // Auto-skip — but only increment once per track (onError may also fire)
-        consecutiveErrorsRef.current++;
-        if (consecutiveErrorsRef.current >= 5) {
-          toast.error("Multiple tracks failed to play — stopping playback");
-          consecutiveErrorsRef.current = 0;
-          return;
-        }
-        toast.error("Failed to play track — skipping to next");
-        scheduleSkip();
-      });
-  }
-
   function shuffleArray<T>(arr: T[]): T[] {
     const a = [...arr];
     for (let i = a.length - 1; i > 0; i--) {
@@ -405,54 +545,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return a;
   }
 
-  async function play(tracks: Track[], startIndex = 0) {
-    if (tracks.length === 0) return;
-    // Clear any pending auto-skip from previous track
-    clearSkipTimeout();
-    // Reset consecutive errors for manual play
-    consecutiveErrorsRef.current = 0;
-    // Clear podcast episode ID when playing non-podcast tracks
-    // (the caller sets it explicitly for podcast episodes)
-    if (podcastEpisodeIdRef.current !== null) {
-      await savePodcastPosition();
-      await setPodcastEpisodeId(null);
-    }
-    originalQueueRef.current = [...tracks];
-    const chosen = tracks[startIndex];
-    if (shuffledRef.current && tracks.length > 1) {
-      const rest = tracks.filter((_, i) => i !== startIndex);
-      const shuffled = shuffleArray(rest);
-      const newQueue = [chosen, ...shuffled];
-      setState((s) => ({
-        ...s,
-        queue: newQueue,
-        index: 0,
-        current: chosen,
-        shuffled: true,
-      }));
-      loadAndPlay(chosen);
-    } else {
-      setState((s) => ({
-        ...s,
-        queue: tracks,
-        index: startIndex,
-        current: chosen,
-        shuffled: false,
-      }));
-      loadAndPlay(chosen);
-    }
-  }
-
-  function toggleShuffle() {
+  const toggleShuffle = useCallback(() => {
     setState((s) => {
       if (s.shuffled) {
-        // Turn shuffle OFF: restore original order and find current track's index
         const restored = [...originalQueueRef.current];
         const idx = restored.findIndex((t) => t.id === s.current?.id);
         shuffledRef.current = false;
         return { ...s, queue: restored, index: Math.max(0, idx), shuffled: false };
       } else {
-        // Turn shuffle ON: shuffle remaining tracks, keep current at index 0
         if (s.queue.length <= 1) {
           shuffledRef.current = true;
           return { ...s, shuffled: true };
@@ -465,134 +565,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         return { ...s, queue: [current, ...rest], index: 0, shuffled: true };
       }
     });
-  }
+  }, []);
 
-  function toggleRepeat() {
+  const toggleRepeat = useCallback(() => {
     setState((s) => {
       const next: RepeatMode = s.repeatMode === "off" ? "all" : s.repeatMode === "all" ? "one" : "off";
       return { ...s, repeatMode: next };
     });
-  }
-
-  async function toggle() {
-    if (sourceRef.current === "spotify") {
-      try {
-        await spotifyToggle();
-      } catch {}
-      return;
-    }
-    const a = audioRef.current!;
-    if (a.paused) a.play();
-    else a.pause();
-  }
-
-  function goNext() {
-    // Clear any pending skip timeout to prevent double-skipping
-    clearSkipTimeout();
-    setState((s) => {
-      // Repeat One: replay current track
-      if (s.repeatMode === "one" && s.current) {
-        loadAndPlay(s.current);
-        return s;
-      }
-
-      const ni = s.index + 1;
-      if (ni >= s.queue.length) {
-        // Repeat All: wrap to beginning
-        if (s.repeatMode === "all" && s.queue.length > 0) {
-          const first = s.queue[0];
-          // If shuffle is also on, reshuffle the queue
-          if (s.shuffled && s.queue.length > 1) {
-            const newQueue = shuffleArray(s.queue);
-            loadAndPlay(newQueue[0]);
-            return { ...s, queue: newQueue, index: 0, current: newQueue[0] };
-          }
-          loadAndPlay(first);
-          return { ...s, index: 0, current: first };
-        }
-        // Repeat Off: stop at end
-        if (sourceRef.current === "local") {
-          const a = audioRef.current!;
-          a.pause();
-        } else if (sourceRef.current === "spotify") {
-          spotifyPause().catch(() => {});
-        }
-        return { ...s, playing: false };
-      }
-      const nt = s.queue[ni];
-      loadAndPlay(nt);
-      return { ...s, index: ni, current: nt };
-    });
-  }
-
-  function next() {
-    flushLocalPlay(false);
-    goNext();
-  }
-
-  function prev() {
-    flushLocalPlay(false);
-    setState((s) => {
-      const ni = Math.max(0, s.index - 1);
-      const nt = s.queue[ni];
-      if (nt) loadAndPlay(nt);
-      return { ...s, index: ni, current: nt };
-    });
-  }
-
-  function seek(sec: number) {
-    if (sourceRef.current === "spotify") {
-      spotifySeek(sec * 1000).catch(() => {});
-      return;
-    }
-    const a = audioRef.current!;
-    a.currentTime = sec;
-  }
-
-  function setVolume(v: number) {
-    const a = audioRef.current!;
-    a.volume = v;
-    spotifySetVolume(v).catch(() => {});
-    setState((s) => ({ ...s, volume: v }));
-  }
-
-  // ----- Podcast playback position tracking -----
-
-  const clearPodcastSaveInterval = useCallback(() => {
-    if (podcastSaveIntervalRef.current !== null) {
-      clearInterval(podcastSaveIntervalRef.current);
-      podcastSaveIntervalRef.current = null;
-    }
   }, []);
 
-  const savePodcastPosition = useCallback(async () => {
-    if (podcastEpisodeIdRef.current === null) return;
+  const setVolume = useCallback((v: number) => {
+    volumeRef.current = v;
     const a = audioRef.current;
-    if (!a) return;
-    const pos = Math.floor(a.currentTime);
-    if (pos <= 0) return;
-    const completed = a.ended || (a.duration > 0 && a.currentTime >= a.duration - 1);
-    try {
-      await api.savePodcastEpisodePosition(podcastEpisodeIdRef.current, pos, completed);
-    } catch {
-      /* ignore */
+    if (a) a.volume = v;
+    // Only call Spotify API when Spotify is the active source
+    if (sourceRef.current === "spotify") {
+      spotifySetVolume(v).catch(() => {});
     }
+    setState((s) => ({ ...s, volume: v }));
   }, []);
-
-  const setPodcastEpisodeId = useCallback(async (episodeId: number | null) => {
-    // Save position for previous episode before switching (await to ensure it completes)
-    if (podcastEpisodeIdRef.current !== null && podcastEpisodeIdRef.current !== episodeId) {
-      await savePodcastPosition();
-    }
-    clearPodcastSaveInterval();
-    podcastEpisodeIdRef.current = episodeId;
-    if (episodeId !== null) {
-      // Save position every 5 seconds during playback
-      podcastSaveIntervalRef.current = window.setInterval(() => {
-        savePodcastPosition();
-      }, 5000);
-    }
-  }, [savePodcastPosition, clearPodcastSaveInterval]);
 
   // Save position on page unload
   useEffect(() => {
@@ -602,7 +593,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (a) {
           const pos = Math.floor(a.currentTime);
           if (pos > 0) {
-            // Use sendBeacon for reliable delivery on page unload
             const data = JSON.stringify({ position_sec: pos, completed: a.ended });
             navigator.sendBeacon(
               `/api/podcasts/episodes/${podcastEpisodeIdRef.current}/position`,
@@ -621,7 +611,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ ...state, play, toggle, next, prev, seek, setVolume, toggleShuffle, toggleRepeat, setPodcastEpisodeId }}
+      value={{
+        ...state,
+        play: playFn,
+        toggle: toggleFn,
+        next,
+        prev,
+        seek: seekFn,
+        setVolume,
+        toggleShuffle,
+        toggleRepeat,
+        setPodcastEpisodeId: setPodcastEpisodeIdCb,
+      }}
     >
       {children}
     </Ctx.Provider>
