@@ -3,6 +3,7 @@ package playlists
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -32,13 +33,25 @@ type PlaylistWithTracks struct {
 	Tracks        []PlaylistTrack `json:"tracks"`
 }
 
+const maxBodySize = 1 << 20 // 1 MB
+
 type API struct{ db *sql.DB }
 
 func New(db *sql.DB) *API { return &API{db: db} }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[playlists] writeJSON encode: %v", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": message}); err != nil {
+		log.Printf("[playlists] writeError encode: %v", err)
+	}
 }
 
 func (a *API) Mount(r chi.Router) {
@@ -60,7 +73,8 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		GROUP BY p.id
 		ORDER BY p.created_at DESC`)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] list query: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -68,13 +82,15 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var p Playlist
 		if err := rows.Scan(&p.ID, &p.Name, &p.TrackCount, &p.TotalDuration, &p.CreatedAt); err != nil {
-			http.Error(w, err.Error(), 500)
+			log.Printf("[playlists] list scan: %v", err)
+			writeError(w, err.Error(), 500)
 			return
 		}
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] list rows: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, out)
@@ -86,21 +102,23 @@ type createReq struct {
 
 func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	var req createReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), 400)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[playlists] create decode: %v", err)
+		writeError(w, err.Error(), 400)
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, "name is required", 400)
+		writeError(w, "name is required", 400)
 		return
 	}
 	if len(req.Name) > 256 {
-		http.Error(w, "name must be 256 characters or fewer", 400)
+		writeError(w, "name must be 256 characters or fewer", 400)
 		return
 	}
 	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name) VALUES (?)`, req.Name)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] create insert: %v", err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -113,7 +131,8 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	err := a.db.QueryRowContext(r.Context(), `
 		SELECT id, name, created_at FROM playlists WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.CreatedAt)
 	if err != nil {
-		http.Error(w, "not found", 404)
+		log.Printf("[playlists] get playlist %d: %v", id, err)
+		writeError(w, "not found", 404)
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
@@ -123,7 +142,8 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		WHERE i.playlist_id = ?
 		ORDER BY i.position`, id)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] get tracks query playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -147,7 +167,8 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 			&position,
 		)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			log.Printf("[playlists] get track scan playlist %d: %v", id, err)
+			writeError(w, err.Error(), 500)
 			return
 		}
 		if path.Valid { t.Path = path.String }
@@ -175,7 +196,8 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		p.TotalDuration += int(t.DurationSec)
 	}
 	if err := rows.Err(); err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] get rows err playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	p.TrackCount = len(p.Tracks)
@@ -192,26 +214,29 @@ type updateReq struct {
 func (a *API) update(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	var req updateReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), 400)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[playlists] update decode playlist %d: %v", id, err)
+		writeError(w, err.Error(), 400)
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, "name is required", 400)
+		writeError(w, "name is required", 400)
 		return
 	}
 	res, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=? WHERE id=?`, req.Name, id)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] update exec playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] update rowsAffected playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	if rows == 0 {
-		http.Error(w, "playlist not found", 404)
+		writeError(w, "playlist not found", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
@@ -221,16 +246,18 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=?`, id)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] delete exec playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] delete rowsAffected playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	if rows == 0 {
-		http.Error(w, "playlist not found", 404)
+		writeError(w, "playlist not found", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
@@ -243,12 +270,24 @@ type addTrackReq struct {
 func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	var req addTrackReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), 400)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[playlists] addTrack decode playlist %d: %v", id, err)
+		writeError(w, err.Error(), 400)
 		return
 	}
 	if req.TrackID <= 0 {
-		http.Error(w, "track_id is required", 400)
+		writeError(w, "track_id is required", 400)
+		return
+	}
+	// Validate track exists before adding to playlist
+	var exists int
+	if err := a.db.QueryRowContext(r.Context(), `SELECT 1 FROM tracks WHERE id=?`, req.TrackID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, "track not found", 404)
+			return
+		}
+		log.Printf("[playlists] addTrack track lookup playlist %d track %d: %v", id, req.TrackID, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	res, err := a.db.ExecContext(r.Context(), `
@@ -256,16 +295,19 @@ func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 		SELECT ?, ?, COALESCE((SELECT MAX(position)+1 FROM playlist_items WHERE playlist_id=?), 0)`,
 		id, req.TrackID, id)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] addTrack insert playlist %d track %d: %v", id, req.TrackID, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] addTrack rowsAffected playlist %d track %d: %v", id, req.TrackID, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	if rows == 0 {
-		http.Error(w, "track not added", 500)
+		log.Printf("[playlists] addTrack no rows affected playlist %d track %d", id, req.TrackID)
+		writeError(w, "track not added", 500)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
@@ -274,18 +316,24 @@ func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 func (a *API) removeTrack(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	position, _ := strconv.ParseInt(chi.URLParam(r, "position"), 10, 64)
+	if position < 0 {
+		writeError(w, "position must be >= 0", 400)
+		return
+	}
 	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlist_items WHERE playlist_id=? AND position=?`, id, position)
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] removeTrack exec playlist %d position %d: %v", id, position, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
+		log.Printf("[playlists] removeTrack rowsAffected playlist %d position %d: %v", id, position, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	if rows == 0 {
-		http.Error(w, "track not found", 404)
+		writeError(w, "track not found", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
