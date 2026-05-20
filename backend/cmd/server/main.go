@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/skip2/go-qrcode"
 
 	"github.com/kevin/lexicon/internal/analytics"
+	"github.com/kevin/lexicon/internal/apple"
 	"github.com/kevin/lexicon/internal/auth"
 	"github.com/kevin/lexicon/internal/config"
 	"github.com/kevin/lexicon/internal/db"
@@ -58,9 +61,42 @@ func main() {
 	}
 
 	scn := scanner.New(database)
-	libAPI := library.New(database)
+
+	// Compute podcast output directory early so it can be included in
+	// the media roots for the streamer and cover handler's path checks.
+	podcastOutput := cfg.PodcastDir
+	if podcastOutput == "" {
+		for _, r := range strings.Split(cfg.MediaRoots, ";") {
+			if r = strings.TrimSpace(r); r != "" {
+				podcastOutput = r
+				break
+			}
+		}
+	}
+
+	// Build media roots: MEDIA_ROOTS + PODCAST_DIR (if not already included).
+	mediaRoots := parseMediaRoots(cfg.MediaRoots)
+	if podcastOutput != "" {
+		found := false
+		for _, r := range mediaRoots {
+			if r == podcastOutput {
+				found = true
+				break
+			}
+		}
+		if !found {
+			mediaRoots = append(mediaRoots, filepath.Clean(podcastOutput))
+		}
+	}
+
+	libAPI := library.New(database, mediaRoots)
 	playlistAPI := playlists.New(database)
-	strm := streamer.New(database)
+
+	// Streamer takes the same combined roots as the library so podcast files
+	// (which may live outside MEDIA_ROOTS, e.g. under PODCAST_DIR in
+	// Program Files) pass the path-traversal guard. DO NOT rebuild this
+	// list independently — see plans/lexicon-fix-podcast-403-streamer-roots-regression.md.
+	strm := streamer.New(database, strings.Join(mediaRoots, ";"))
 	hist := history.New(database)
 	analyt := analytics.New(database, cfg.Timezone)
 	ws := websearch.New(cfg.WebSearchEnabled)
@@ -73,26 +109,40 @@ func main() {
 		FrontendURL:  cfg.SpotifyFrontendURL,
 	})
 
+	// Apple Music API. Credentials live in the DB (entered via Settings),
+	// not in env. This is intentional — the user requested GUI-only setup.
+	appleAPI := apple.New(database, apple.Config{AppName: "Lexicon"})
+
 	rec := recommender.New(database, recommender.DeepSeekConfig{
 		APIKey:   cfg.DeepSeekAPIKey,
 		Model:    cfg.DeepSeekModel,
 		Thinking: cfg.DeepSeekThinking,
 		BaseURL:  cfg.DeepSeekBaseURL,
-	}, ws, spotifyAPI)
+	}, ws, spotifyAPI, appleAPI)
 
-	// Compute podcast output directory (needed by doRescan and podcastAPI)
-	podcastOutput := cfg.PodcastDir
-	if podcastOutput == "" {
-		for _, r := range strings.Split(cfg.MediaRoots, ";") {
-			if r = strings.TrimSpace(r); r != "" {
-				podcastOutput = r
-				break
-			}
-		}
-	}
+	// rescan state: mutex + cancellable context so a new rescan cancels any
+	// in-flight one. This prevents goroutine accumulation when /api/scan is
+	// called repeatedly while a previous scan is still running.
+	var (
+		rescanMu       sync.Mutex
+		rescanCancel   context.CancelFunc
+		rescanGen      int // generation counter; incremented on each new rescan
+	)
 
-	// Helper closure used by both the rescan endpoint and the downloader
+	// Helper closure used by both the rescan endpoint and the downloader.
+	// Only one rescan runs at a time; a new call cancels the previous one.
 	doRescan := func() {
+		rescanMu.Lock()
+		// Cancel any in-flight rescan
+		if rescanCancel != nil {
+			rescanCancel()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		rescanCancel = cancel
+		myGen := rescanGen
+		rescanGen++
+		rescanMu.Unlock()
+
 		roots := strings.Split(cfg.MediaRoots, ";")
 		// Always include the podcast output directory so downloaded episodes
 		// get indexed into the tracks table and become searchable/playable.
@@ -113,10 +163,17 @@ func main() {
 			if root == "" {
 				continue
 			}
-			if err := scn.ScanRoot(context.Background(), root); err != nil {
+			if err := scn.ScanRoot(ctx, root); err != nil {
 				log.Printf("[scanner] %s: %v", root, err)
 			}
 		}
+
+		rescanMu.Lock()
+		// Only clear if no new rescan has started since we began.
+		if rescanGen == myGen+1 {
+			rescanCancel = nil
+		}
+		rescanMu.Unlock()
 	}
 
 	// SpotiFLAC downloader. Output dir falls back to first MEDIA_ROOTS entry.
@@ -263,7 +320,9 @@ func main() {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(info)
+		if err := json.NewEncoder(w).Encode(info); err != nil {
+			log.Printf("[server] netinfo encode: %v", err)
+		}
 	})
 
 	libAPI.Mount(r)
@@ -275,9 +334,12 @@ func main() {
 	spotifyAPI.Mount(r)
 	dlAPI.Mount(r)
 	podcastAPI.Mount(r)
+	appleAPI.Mount(r)
 
 	// Start Spotify background syncer (no-op if SPOTIFY_CLIENT_ID empty or not connected)
-	spotifyAPI.Syncer().Start(context.Background())
+	spotifyAPI.StartSyncer()
+	// Start Apple Music background syncer (no-op until credentials saved + user connects)
+	appleAPI.StartSyncer()
 
 	// Trigger rescan endpoint
 	r.Post("/api/scan", func(w http.ResponseWriter, _ *http.Request) {
@@ -367,9 +429,25 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	log.Printf("[lexicon] shutting down...")
+	dlAPI.Shutdown()
+	podcastAPI.Shutdown()
+	spotifyAPI.Shutdown()
+	appleAPI.Shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+}
+
+// parseMediaRoots splits the semicolon-separated MEDIA_ROOTS env var into a slice.
+func parseMediaRoots(raw string) []string {
+	var roots []string
+	for _, r := range strings.Split(raw, ";") {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			roots = append(roots, r)
+		}
+	}
+	return roots
 }
 
 // getLocalIP returns the preferred outbound IP address of this machine.
