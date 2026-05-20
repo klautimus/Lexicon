@@ -119,7 +119,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT IFNULL(COALESCE(NULLIF(t.album_artist,''),t.artist),'') AS artist, COUNT(*), IFNULL(SUM(p.duration_played_sec),0)
-		FROM plays p JOIN tracks t ON t.id=p.track_id
+		FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
 		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
 		log.Printf("[analytics] topArtists query: %v", err)
@@ -152,7 +152,7 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT t.id, t.title, IFNULL(t.artist,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
+		SELECT t.id, IFNULL(t.title,'(deleted)'), IFNULL(t.artist,''), COUNT(*) FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
 		log.Printf("[analytics] topTracks query: %v", err)
@@ -186,7 +186,7 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
+		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
 		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`)
 	if err != nil {
 		log.Printf("[analytics] topGenres query: %v", err)

@@ -8,7 +8,7 @@
 #define MyAppExeName "lexicon.exe"
 
 [Setup]
-AppId={{A1B2C3D4-E5F6-7890-1234-567890ABCDEF}
+AppId={{A707A5EF-D757-4D2D-8583-F486AFDA9D11}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}

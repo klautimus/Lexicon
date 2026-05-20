@@ -138,9 +138,17 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Kick off an immediate sync in the background
+	// Kick off an immediate sync in the background, detached from the
+	// request context so the sync isn't cancelled when the HTTP response
+	// is sent (the client gets a redirect immediately).
 	if a.sync != nil {
-		go a.sync.RunOnce(r.Context())
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := a.sync.RunOnce(ctx); err != nil {
+				log.Printf("[spotify] post-callback sync: %v", err)
+			}
+		}()
 	}
 
 	http.Redirect(w, r, a.cfg.FrontendURL+"/settings?spotify=ok", http.StatusFound)

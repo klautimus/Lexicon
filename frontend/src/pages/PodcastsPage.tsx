@@ -18,6 +18,8 @@ export default function PodcastsPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [downloadingIds, setDownloadingIds] = useState<Set<number>>(new Set());
   const pollIntervals = useRef<Map<number, ReturnType<typeof setInterval>>>(new Map());
+  const selectedFeedRef = useRef<PodcastFeed | null>(null);
+  selectedFeedRef.current = selectedFeed;
 
   // Cleanup all polling intervals on unmount
   useEffect(() => {
@@ -31,10 +33,12 @@ export default function PodcastsPage() {
     try {
       const f = await api.podcastFeeds();
       setFeeds(f);
-      if (f.length > 0 && !selectedFeed) {
+      // Use ref to read current selectedFeed without adding it as a dependency
+      const current = selectedFeedRef.current;
+      if (f.length > 0 && !current) {
         setSelectedFeed(f[0]);
-      } else if (selectedFeed) {
-        const updated = f.find((x) => x.id === selectedFeed.id);
+      } else if (current) {
+        const updated = f.find((x) => x.id === current.id);
         if (updated) setSelectedFeed(updated);
       }
     } catch {
@@ -42,7 +46,7 @@ export default function PodcastsPage() {
     } finally {
       setLoading(false);
     }
-  }, [selectedFeed]);
+  }, []);
 
   const loadEpisodes = useCallback(async (feedId: number) => {
     try {
@@ -97,6 +101,7 @@ export default function PodcastsPage() {
   };
 
   const handleDownloadEpisode = async (episode: PodcastEpisode) => {
+    if (!selectedFeed) return;
     setDownloadingIds((prev) => new Set(prev).add(episode.id));
     try {
       await api.podcastDownloadEpisode(episode.id);
@@ -111,9 +116,32 @@ export default function PodcastsPage() {
       const interval = setInterval(async () => {
         attempts++;
         try {
-          const eps = await api.podcastEpisodes(selectedFeed!.id);
+          // Re-read selectedFeed from ref to avoid stale closure
+          const currentFeed = selectedFeedRef.current;
+          if (!currentFeed) {
+            clearInterval(interval);
+            pollIntervals.current.delete(episode.id);
+            setDownloadingIds((prev) => {
+              const next = new Set(prev);
+              next.delete(episode.id);
+              return next;
+            });
+            return;
+          }
+          const eps = await api.podcastEpisodes(currentFeed.id);
           const updated = eps.find((e) => e.id === episode.id);
-          if (updated?.downloaded) {
+          if (!updated) {
+            // Episode no longer exists in feed — stop polling
+            setDownloadingIds((prev) => {
+              const next = new Set(prev);
+              next.delete(episode.id);
+              return next;
+            });
+            clearInterval(interval);
+            pollIntervals.current.delete(episode.id);
+            return;
+          }
+          if (updated.downloaded) {
             setDownloadingIds((prev) => {
               const next = new Set(prev);
               next.delete(episode.id);
@@ -122,7 +150,7 @@ export default function PodcastsPage() {
             clearInterval(interval);
             pollIntervals.current.delete(episode.id);
             toast.success(`Downloaded "${episode.title}"`);
-          } else if (updated?.download_error) {
+          } else if (updated.download_error) {
             setDownloadingIds((prev) => {
               const next = new Set(prev);
               next.delete(episode.id);

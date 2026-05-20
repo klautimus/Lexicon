@@ -290,10 +290,30 @@ func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err.Error(), 500)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `
-		INSERT INTO playlist_items (playlist_id, track_id, position)
-		SELECT ?, ?, COALESCE((SELECT MAX(position)+1 FROM playlist_items WHERE playlist_id=?), 0)`,
-		id, req.TrackID, id)
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("[playlists] addTrack begin tx playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	defer tx.Rollback()
+
+	var maxPos sql.NullInt64
+	if err := tx.QueryRowContext(r.Context(),
+		`SELECT MAX(position) FROM playlist_items WHERE playlist_id=?`,
+		id).Scan(&maxPos); err != nil {
+		log.Printf("[playlists] addTrack max position playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	nextPos := int64(0)
+	if maxPos.Valid {
+		nextPos = maxPos.Int64 + 1
+	}
+
+	res, err := tx.ExecContext(r.Context(),
+		`INSERT INTO playlist_items (playlist_id, track_id, position) VALUES (?, ?, ?)`,
+		id, req.TrackID, nextPos)
 	if err != nil {
 		log.Printf("[playlists] addTrack insert playlist %d track %d: %v", id, req.TrackID, err)
 		writeError(w, err.Error(), 500)
@@ -308,6 +328,11 @@ func (a *API) addTrack(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		log.Printf("[playlists] addTrack no rows affected playlist %d track %d", id, req.TrackID)
 		writeError(w, "track not added", 500)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[playlists] addTrack commit playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})

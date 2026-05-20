@@ -310,14 +310,18 @@ func (a *API) deleteTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := tx.ExecContext(r.Context(), `DELETE FROM tracks WHERE id=?`, id); err != nil {
-		tx.Rollback()
+		if rbErr := tx.Rollback(); rbErr != nil {
+			log.Printf("[library] deleteTrack rollback exec id %d: %v", id, rbErr)
+		}
 		log.Printf("[library] deleteTrack exec id %d: %v", id, err)
 		writeError(w, "delete failed", 500)
 		return
 	}
 	if path != "" {
-		if err := os.Remove(path); err != nil {
-			tx.Rollback()
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				log.Printf("[library] deleteTrack rollback remove id %d: %v", id, rbErr)
+			}
 			log.Printf("[library] deleteTrack remove id %d path %s: %v", id, path, err)
 			writeError(w, "delete failed", 500)
 			return

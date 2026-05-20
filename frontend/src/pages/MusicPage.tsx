@@ -140,23 +140,38 @@ export default function MusicPage() {
   }
 
   async function handleBulkUpgrade() {
-    if (allTracks.length === 0) return;
+    // Fetch ALL track IDs from the backend, not just the current page
+    let allIds: number[] = [];
+    let offset = 0;
+    const batchSize = 1000;
+    try {
+      while (true) {
+        const res = await api.tracks("music", batchSize, offset);
+        allIds = allIds.concat(res.tracks.map((t) => t.id));
+        if (res.tracks.length < batchSize) break;
+        offset += batchSize;
+      }
+    } catch (e: any) {
+      toast.error("Failed to fetch track list: " + (e.message || "unknown error"));
+      return;
+    }
+    if (allIds.length === 0) return;
     const confirmed = window.confirm(
-      `Upgrade all ${allTracks.length} tracks to higher quality (Opus/bestaudio)?\n\nThis will re-download each track from YouTube using the new pipeline. Existing files will be replaced.`
+      `Upgrade all ${allIds.length} tracks to higher quality (Opus/bestaudio)?\n\nThis will re-download each track from YouTube using the new pipeline. Existing files will be replaced.`
     );
     if (!confirmed) return;
     setUpgrading(true);
     setUpgradeProgress("Starting...");
     let done = 0;
     let failed = 0;
-    for (const t of allTracks) {
+    for (const id of allIds) {
       try {
-        await api.upgradeTrack(t.id);
+        await api.upgradeTrack(id);
         done++;
-        setUpgradeProgress(`Upgrading: ${done}/${allTracks.length} (${failed} failed)`);
+        setUpgradeProgress(`Upgrading: ${done}/${allIds.length} (${failed} failed)`);
       } catch {
         failed++;
-        setUpgradeProgress(`Upgrading: ${done}/${allTracks.length} (${failed} failed)`);
+        setUpgradeProgress(`Upgrading: ${done}/${allIds.length} (${failed} failed)`);
       }
       await new Promise((r) => setTimeout(r, 500));
     }

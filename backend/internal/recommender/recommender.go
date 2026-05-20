@@ -321,7 +321,7 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req chatReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad json", 400)
 		return
 	}
@@ -891,7 +891,10 @@ Rules:
 	}
 
 	var out RecsPayload
-	json.Unmarshal([]byte(reply), &out)
+	if err := json.Unmarshal([]byte(reply), &out); err != nil {
+		log.Printf("[recommender] deepseek parse: %v", err)
+		return RecsPayload{}, err
+	}
 
 	// Resolve track_id for all items; upgrade "discover" items that exist in library
 	for i, it := range out.Items {

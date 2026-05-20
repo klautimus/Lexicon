@@ -83,8 +83,8 @@ func (a *API) recordPlay(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) recent(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT p.id, p.track_id, t.title, IFNULL(t.artist,''), IFNULL(t.album,''), p.started_at, p.duration_played_sec, p.completed, p.source
-		FROM plays p JOIN tracks t ON t.id=p.track_id
+		SELECT p.id, p.track_id, IFNULL(t.title,'(deleted)'), IFNULL(t.artist,''), IFNULL(t.album,''), p.started_at, p.duration_played_sec, p.completed, p.source
+		FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
 		ORDER BY p.started_at DESC LIMIT 50`)
 	if err != nil {
 		log.Printf("[history] recent query: %v", err)

@@ -180,9 +180,9 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 		s.loudnessSem <- struct{}{}        // acquire
 		defer func() { <-s.loudnessSem }() // release
 
-		l := measureLoudness(context.Background(), path)
+		l := measureLoudness(ctx, path)
 		if l.InputI != 0 {
-			_, err := s.db.ExecContext(context.Background(),
+			_, err := s.db.ExecContext(ctx,
 				`UPDATE tracks SET loudness_integrated=?, loudness_true_peak=?, loudness_range=? WHERE path=?`,
 				l.InputI, l.InputTP, l.InputLRA, path)
 			if err != nil {

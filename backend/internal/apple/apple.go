@@ -279,16 +279,21 @@ func (a *API) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Preserve last_synced_at across reconnections so we don't re-import
+	// all tracks as new. Only an explicit full re-sync should reset it.
+	var existingLastSyncedAt int64
+	_ = a.db.QueryRowContext(r.Context(),
+		`SELECT last_synced_at FROM apple_music_user WHERE id=1`).Scan(&existingLastSyncedAt)
+
 	now := time.Now().Unix()
 	_, err = a.db.ExecContext(r.Context(), `
 		INSERT INTO apple_music_user(id, music_user_token, storefront, display_name, last_synced_at, connected_at)
-		VALUES(1, ?, ?, '', 0, ?)
+		VALUES(1, ?, ?, '', ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			music_user_token=excluded.music_user_token,
 			storefront=excluded.storefront,
-			last_synced_at=0,
 			connected_at=excluded.connected_at
-	`, req.MusicUserToken, storefront, now)
+	`, req.MusicUserToken, storefront, existingLastSyncedAt, now)
 	if err != nil {
 		log.Printf("[apple] connect: store mut: %v", err)
 		http.Error(w, "db write failed", 500)

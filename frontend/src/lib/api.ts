@@ -1,14 +1,27 @@
 const API = "/api";
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(API + path, {
-    headers: {
-      "Content-Type": "application/json",
-      "ngrok-skip-browser-warning": "1",
-      ...(init?.headers || {}),
-    },
-    ...init,
-  });
+  let r: Response;
+  try {
+    r = await fetch(API + path, {
+      headers: {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "1",
+        ...(init?.headers || {}),
+      },
+      ...init,
+    });
+  } catch (e: any) {
+    // Network error: offline, DNS failure, timeout, CORS block, etc.
+    if (e?.name === "AbortError") {
+      throw new Error("Request was cancelled.");
+    }
+    const msg = e?.message || "";
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("network")) {
+      throw new Error("Unable to reach the server. Check your connection and try again.");
+    }
+    throw new Error(`Network error: ${msg || "connection failed"}`);
+  }
   if (!r.ok) {
     const text = await r.text();
     if (text.includes("ngrok")) {

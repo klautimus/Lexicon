@@ -139,7 +139,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const loadAndPlay = useCallback(async (t: Track) => {
     clearSkipTimeout();
-    playSessionRef.current++;
+    const session = ++playSessionRef.current;
     consecutiveErrorsRef.current = 0;
 
     flushLocalPlay(false);
@@ -166,8 +166,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
       try {
         await spotifyPlayURI(uri);
+        // Guard: if a newer loadAndPlay was called, discard this result
+        if (playSessionRef.current !== session) return;
         setState((s) => ({ ...s, loading: false }));
       } catch (e: any) {
+        if (playSessionRef.current !== session) return;
         const msg = e?.message || "Spotify playback failed";
         setState((s) => ({
           ...s,
@@ -187,6 +190,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     a.src = api.streamUrl(t.id);
     a.play()
       .then(() => {
+        // Guard: if a newer loadAndPlay was called, discard this result
+        if (playSessionRef.current !== session) return;
         sourceRef.current = "local";
         setState((s) => ({ ...s, source: "local", error: null, loading: false }));
         playStartRef.current = Math.floor(Date.now() / 1000);
@@ -200,6 +205,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         }
       })
       .catch((e: any) => {
+        // Guard: if a newer loadAndPlay was called, discard this result
+        if (playSessionRef.current !== session) return;
         const msg = e?.message || "Audio playback failed";
         console.error("[player] play failed:", msg);
         sourceRef.current = null;
@@ -218,36 +225,39 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const goNext = useCallback(() => {
     clearSkipTimeout();
-    setState((s) => {
-      if (s.repeatMode === "one" && s.current) {
-        loadAndPlay(s.current);
-        return s;
-      }
+    // Read current state via ref to avoid nested setState
+    const s = stateRef.current;
+    if (s.repeatMode === "one" && s.current) {
+      loadAndPlay(s.current);
+      return;
+    }
 
-      const ni = s.index + 1;
-      if (ni >= s.queue.length) {
-        if (s.repeatMode === "all" && s.queue.length > 0) {
-          const first = s.queue[0];
-          if (s.shuffled && s.queue.length > 1) {
-            const newQueue = shuffleArray(s.queue);
-            loadAndPlay(newQueue[0]);
-            return { ...s, queue: newQueue, index: 0, current: newQueue[0] };
-          }
-          loadAndPlay(first);
-          return { ...s, index: 0, current: first };
+    const ni = s.index + 1;
+    if (ni >= s.queue.length) {
+      if (s.repeatMode === "all" && s.queue.length > 0) {
+        const first = s.queue[0];
+        if (s.shuffled && s.queue.length > 1) {
+          const newQueue = shuffleArray(s.queue);
+          loadAndPlay(newQueue[0]);
+          setState((prev) => ({ ...prev, queue: newQueue, index: 0, current: newQueue[0] }));
+          return;
         }
-        if (sourceRef.current === "local") {
-          const a = audioRef.current;
-          if (a) a.pause();
-        } else if (sourceRef.current === "spotify") {
-          spotifyPause().catch(() => {});
-        }
-        return { ...s, playing: false };
+        loadAndPlay(first);
+        setState((prev) => ({ ...prev, index: 0, current: first }));
+        return;
       }
-      const nt = s.queue[ni];
-      loadAndPlay(nt);
-      return { ...s, index: ni, current: nt };
-    });
+      if (sourceRef.current === "local") {
+        const a = audioRef.current;
+        if (a) a.pause();
+      } else if (sourceRef.current === "spotify") {
+        spotifyPause().catch(() => {});
+      }
+      setState((prev) => ({ ...prev, playing: false }));
+      return;
+    }
+    const nt = s.queue[ni];
+    loadAndPlay(nt);
+    setState((prev) => ({ ...prev, index: ni, current: nt }));
   }, [clearSkipTimeout, loadAndPlay]);
 
   const scheduleSkip = useCallback(() => {
@@ -511,14 +521,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     const id = setInterval(async () => {
-      if (sourceRef.current !== "spotify" || cancelled) return;
+      if (cancelled || sourceRef.current !== "spotify") return;
       try {
         // Cache the player promise so we don't re-init SDK on every tick
         if (!spotifyPlayerPromiseRef.current) {
           spotifyPlayerPromiseRef.current = getSpotifyPlayer();
         }
         const { player } = await spotifyPlayerPromiseRef.current;
+        if (cancelled) return;
         const st = await player.getCurrentState();
+        if (cancelled) return;
         if (!st) return;
         setState((s) => ({
           ...s,

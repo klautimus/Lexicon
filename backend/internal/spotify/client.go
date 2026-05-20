@@ -79,30 +79,50 @@ func spotifyGET(ctx context.Context, accessToken, path string, q url.Values) (*h
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode == 429 {
+	return spotifyGETWithRetries(ctx, accessToken, u, q, 5)
+}
+
+// spotifyGETWithRetries executes a GET request against the Spotify API with
+// exponential-backoff retries on 429 (rate-limited) responses. maxRetries
+// caps the total number of retry attempts; on each wait the Retry-After
+// header is honoured when present, otherwise exponential backoff with jitter
+// is used.
+func spotifyGETWithRetries(ctx context.Context, accessToken, u string, _ url.Values, maxRetries int) (*http.Response, error) {
+	var lastResp *http.Response
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != 429 {
+			return resp, nil
+		}
+		// 429 — rate limited.
 		ra := resp.Header.Get("Retry-After")
 		secs, _ := strconv.Atoi(ra)
 		if secs <= 0 {
-			secs = 1
+			// Exponential backoff with jitter: 1s, 2s, 4s, 8s …
+			secs = 1 << uint(attempt)
+			if secs > 30 {
+				secs = 30
+			}
 		}
 		resp.Body.Close()
-		select {
-		case <-time.After(time.Duration(secs) * time.Second):
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		lastResp = resp
+		if attempt < maxRetries {
+			select {
+			case <-time.After(time.Duration(secs) * time.Second):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
-		return spotifyGET(ctx, accessToken, path, q)
 	}
-	return resp, nil
+	return lastResp, nil
 }
 
 // ----- Recently played -----

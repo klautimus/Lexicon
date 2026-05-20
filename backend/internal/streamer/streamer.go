@@ -12,6 +12,35 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// allowedMIMETypes is the whitelist of permitted Content-Type values for streaming.
+// BUG-BUILD-13: MIME types from the DB must be validated to prevent content-type confusion.
+var allowedMIMETypes = map[string]bool{
+	"audio/mpeg":       true,
+	"audio/mp3":        true,
+	"audio/flac":       true,
+	"audio/ogg":        true,
+	"audio/opus":       true,
+	"audio/aac":        true,
+	"audio/mp4":        true,
+	"audio/x-m4a":      true,
+	"audio/wav":        true,
+	"audio/x-wav":      true,
+	"audio/webm":       true,
+	"audio/x-ms-wma":   true,
+	"audio/aiff":       true,
+	"audio/x-aiff":     true,
+	"image/jpeg":       true,
+	"image/png":        true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"image/bmp":        true,
+	"application/octet-stream": true,
+}
+
+func isValidMIME(mime string) bool {
+	return allowedMIMETypes[strings.ToLower(strings.TrimSpace(mime))]
+}
+
 type Streamer struct {
 	db     *sql.DB
 	roots  []string
@@ -40,7 +69,14 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	// BUG-BUILD-14: Return 400 for invalid track IDs
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		log.Printf("[stream] invalid track ID: %q", idStr)
+		http.Error(w, `{"error":"invalid track ID"}`, http.StatusBadRequest)
+		return
+	}
 	var (
 		path string
 		mime string
@@ -49,6 +85,12 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[stream] stream track %d: lookup: %v", id, err)
 		http.Error(w, "not found", 404)
 		return
+	}
+
+	// BUG-BUILD-13: Validate MIME type against whitelist
+	if !isValidMIME(mime) {
+		log.Printf("[stream] track %d: disallowed MIME type %q, falling back to application/octet-stream", id, mime)
+		mime = "application/octet-stream"
 	}
 
 	// Path traversal guard: resolve symlinks and verify path is within allowed roots
@@ -69,7 +111,7 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[stream] stream track %d: file not found: %s", id, path)
 			http.Error(w, "file not found", 404)
 		} else {
-			log.Printf("[stream] stream track %d: open %s: %v", id, path, err)
+			log.Printf("[stream] stream track %d: open %s: %v", id, path)
 			http.Error(w, "open", 500)
 		}
 		return
@@ -77,7 +119,7 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	stat, err := f.Stat()
 	if err != nil {
-		log.Printf("[stream] stream track %d: stat %s: %v", id, path, err)
+		log.Printf("[stream] stream track %d: stat %s: %v", id, path)
 		http.Error(w, "stat", 500)
 		return
 	}

@@ -287,33 +287,15 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 type statusResponse struct {
-	Configured       bool   `json:"configured"`
-	Bin              string `json:"bin,omitempty"`
-	Output           string `json:"output,omitempty"`
-	FallbackEnabled  bool   `json:"fallback_enabled"`
-	SpotdlBin        string `json:"spotdl_bin,omitempty"`
-	SpotdlFormat     string `json:"spotdl_format,omitempty"`
-	YtdlpBin         string `json:"ytdlp_bin,omitempty"`
-	YtdlpFormat      string `json:"ytdlp_format,omitempty"`
-	FfmpegBin        string `json:"ffmpeg_bin,omitempty"`
+	Configured      bool   `json:"configured"`
+	FallbackEnabled bool   `json:"fallback_enabled"`
 }
 
 func (a *API) status(w http.ResponseWriter, _ *http.Request) {
 	s := statusResponse{Configured: a.configured()}
-	if a.configured() {
-		s.Bin = a.cfg.Bin
-		s.Output = a.cfg.Output
-	}
 	if a.cfg.SpotdlBin != "" {
 		s.FallbackEnabled = true
-		s.SpotdlBin = a.cfg.SpotdlBin
-		s.SpotdlFormat = a.cfg.SpotdlFormat
 	}
-	if a.cfg.YtdlpBin != "" {
-		s.YtdlpBin = a.cfg.YtdlpBin
-		s.YtdlpFormat = a.cfg.YtdlpFormat
-	}
-	s.FfmpegBin = a.cfg.FfmpegBin
 	writeJSON(w, s)
 }
 
@@ -1089,7 +1071,13 @@ func (a *API) runSearch(job *Job, ctx context.Context) {
 	// checking for a track whose path matches the downloaded file.
 	if a.db != nil {
 		go func() {
-			pollCtx, pollCancel := context.WithTimeout(ctx, 2*time.Minute)
+			// Use a fresh context with timeout, detached from the parent ctx
+			// which may already be cancelled when the HTTP request completes.
+			if ctx.Err() != nil {
+				log.Printf("[downloader] runSearch: skipping track resolution, context already cancelled")
+				return
+			}
+			pollCtx, pollCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer pollCancel()
 
 			dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
@@ -1350,7 +1338,11 @@ If the query is ambiguous, make your best guess. Output ONLY JSON, no markdown.`
 	req.Header.Set("Authorization", "Bearer "+a.cfg.DeepSeekAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	// deepSeekClient is a dedicated HTTP client for DeepSeek API calls with a
+	// 30-second timeout. Do not use http.DefaultClient which has no timeout.
+	deepSeekClient := &http.Client{Timeout: 30 * time.Second}
+
+	resp, err := deepSeekClient.Do(req)
 	if err != nil {
 		return deepseekMetadata{}, err
 	}
@@ -1470,7 +1462,9 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.TrackID)
 	}
 
-	go a.runSearchWithTrackID(job, req.TrackID, a.jobContext(r.Context()))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go a.runSearchWithTrackID(job, req.TrackID, a.jobContext(r.Context()), &wg)
 	writeJSON(w, map[string]interface{}{
 		"job_id":  job.ID,
 		"query":   query,
@@ -1480,7 +1474,10 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 }
 
 // runSearchWithTrackID is like runSearch but updates the track's path after download.
-func (a *API) runSearchWithTrackID(job *Job, trackID int64, ctx context.Context) {
+// The caller MUST pass a WaitGroup (add it before calling) so completion is tracked.
+func (a *API) runSearchWithTrackID(job *Job, trackID int64, ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	// Run the standard search pipeline
 	a.runSearch(job, ctx)
 
@@ -1559,9 +1556,9 @@ func (a *API) upgradeAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all music track IDs
-	query := `SELECT id FROM tracks WHERE media_kind='music' ORDER BY id`
-	rows, err := a.db.QueryContext(r.Context(), query)
+	// Get all music track IDs with their metadata
+	rows, err := a.db.QueryContext(r.Context(),
+		`SELECT id, IFNULL(title,''), IFNULL(artist,'') FROM tracks WHERE media_kind='music' ORDER BY id`)
 	if err != nil {
 		log.Printf("[downloader] upgradeAll query: %v", err)
 		http.Error(w, err.Error(), 500)
@@ -1569,24 +1566,75 @@ func (a *API) upgradeAll(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var trackIDs []int64
+	var tracks []struct {
+		id     int64
+		title  string
+		artist string
+	}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var t struct {
+			id     int64
+			title  string
+			artist string
+		}
+		if err := rows.Scan(&t.id, &t.title, &t.artist); err != nil {
 			continue
 		}
-		trackIDs = append(trackIDs, id)
+		tracks = append(tracks, t)
 	}
 
 	limit := req.Limit
-	if limit <= 0 || limit > len(trackIDs) {
-		limit = len(trackIDs)
+	if limit <= 0 || limit > len(tracks) {
+		limit = len(tracks)
+	}
+
+	// Enqueue upgrade jobs for each track up to the limit
+	var jobIDs []string
+	for _, t := range tracks[:limit] {
+		query := strings.TrimSpace(t.title + " " + t.artist)
+		if query == "" {
+			continue
+		}
+
+		job := &Job{
+			ID:        uuid.NewString(),
+			URL:       query,
+			Output:    a.cfg.Output,
+			Status:    StatusQueued,
+			StartedAt: time.Now().Unix(),
+			Log:       []string{},
+			IsSearch:  true,
+			Kind:      "music",
+			TrackID:   t.id,
+		}
+		a.mu.Lock()
+		a.jobs[job.ID] = job
+		a.order = append([]string{job.ID}, a.order...)
+		if len(a.order) > a.maxKeep {
+			for _, oldID := range a.order[a.maxKeep:] {
+				delete(a.jobs, oldID)
+			}
+			a.order = a.order[:a.maxKeep]
+		}
+		a.mu.Unlock()
+
+		if a.db != nil {
+			_, _ = a.db.Exec(
+				`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind, track_id) VALUES(?, ?, ?, ?, ?, 1, ?, ?)`,
+				job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.TrackID)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go a.runSearchWithTrackID(job, t.id, a.jobContext(r.Context()), &wg)
+		jobIDs = append(jobIDs, job.ID)
 	}
 
 	writeJSON(w, map[string]interface{}{
-		"total_tracks":   len(trackIDs),
+		"total_tracks":   len(tracks),
 		"upgrade_limit":  limit,
-		"message":        fmt.Sprintf("Found %d tracks. Use POST /api/library/upgrade with {\"track_id\": N} for each track, or use the bulk upgrade endpoint.", len(trackIDs)),
-		"track_ids":      trackIDs[:limit],
+		"jobs_enqueued":  len(jobIDs),
+		"job_ids":        jobIDs,
+		"message":        fmt.Sprintf("Enqueued %d/%d tracks for upgrade. Poll /api/download/jobs/{id} for status.", len(jobIDs), len(tracks)),
 	})
 }

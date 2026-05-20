@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -216,6 +217,33 @@ func guessAudioExt(audioURL, audioType string) string {
 	return ".mp3"
 }
 
+// isPrivateHost returns true if the hostname resolves to a private, loopback,
+// or link-local IP address. Used to block SSRF via the subscribe endpoint.
+func isPrivateHost(host string) bool {
+	// Strip port if present.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	// Handle literal IPv6 brackets.
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		// If we can't resolve, check if it looks like a private literal IP.
+		ip := net.ParseIP(host)
+		if ip == nil {
+			// Can't parse and can't resolve — block to be safe.
+			return true
+		}
+		ips = []net.IP{ip}
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
+			return true
+		}
+	}
+	return false
+}
+
 // ----- Endpoints -----
 
 func (a *API) status(w http.ResponseWriter, _ *http.Request) {
@@ -337,15 +365,35 @@ func (a *API) subscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", 400)
 		return
 	}
-	url := strings.TrimSpace(req.URL)
-	if url == "" {
+	feedURL := strings.TrimSpace(req.URL)
+	if feedURL == "" {
 		http.Error(w, "url is required", 400)
 		return
 	}
 
-	// Fetch and parse the feed
+	// Validate URL scheme and block private/internal IP ranges (SSRF protection).
+	parsed, err := url.Parse(feedURL)
+	if err != nil || !parsed.IsAbs() || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		http.Error(w, "invalid URL: must be an absolute http or https URL", 400)
+		return
+	}
+	if isPrivateHost(parsed.Hostname()) {
+		http.Error(w, "invalid URL: private/internal IP addresses are not allowed", 400)
+		return
+	}
+
+	// Fetch and parse the feed using a client with timeout and redirect limit.
 	fp := gofeed.NewParser()
-	feed, err := fp.ParseURL(url)
+	fp.Client = &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return fmt.Errorf("too many redirects (max 3)")
+			}
+			return nil
+		},
+	}
+	feed, err := fp.ParseURL(feedURL)
 	if err != nil {
 		http.Error(w, "failed to fetch/parse RSS feed: "+err.Error(), 400)
 		return
@@ -366,7 +414,7 @@ func (a *API) subscribe(w http.ResponseWriter, r *http.Request) {
 	res, err := a.db.ExecContext(r.Context(),
 		`INSERT OR IGNORE INTO podcast_feeds(url, title, description, image_url, author, link, language, last_fetched_at)
 		 VALUES(?,?,?,?,?,?,?,?)`,
-		url, feed.Title, feed.Description, imageURL, authorName, feed.Link, feed.Language, time.Now().Unix())
+		feedURL, feed.Title, feed.Description, imageURL, authorName, feed.Link, feed.Language, time.Now().Unix())
 	if err != nil {
 		http.Error(w, "db error: "+err.Error(), 500)
 		return
@@ -376,7 +424,7 @@ func (a *API) subscribe(w http.ResponseWriter, r *http.Request) {
 	if feedID == 0 {
 		// Already existed — fetch the ID
 		var existingID int64
-		err := a.db.QueryRowContext(r.Context(), `SELECT id FROM podcast_feeds WHERE url=?`, url).Scan(&existingID)
+		err := a.db.QueryRowContext(r.Context(), `SELECT id FROM podcast_feeds WHERE url=?`, feedURL).Scan(&existingID)
 		if err != nil {
 			http.Error(w, "db error: "+err.Error(), 500)
 			return
@@ -1116,8 +1164,8 @@ func (a *API) findLatestAudioFile(dir string) string {
 }
 
 // SyncAllFeeds syncs all subscribed feeds (called by background goroutine).
-func (a *API) SyncAllFeeds() {
-	rows, err := a.db.Query(`SELECT id, url FROM podcast_feeds`)
+func (a *API) SyncAllFeeds(ctx context.Context) {
+	rows, err := a.db.QueryContext(ctx, `SELECT id, url FROM podcast_feeds`)
 	if err != nil {
 		log.Printf("[podcaster] SyncAllFeeds query error: %v", err)
 		return
@@ -1130,7 +1178,7 @@ func (a *API) SyncAllFeeds() {
 		if err := rows.Scan(&id, &url); err != nil {
 			continue
 		}
-		if err := a.doSyncFeed(context.Background(), id, url); err != nil {
+		if err := a.doSyncFeed(ctx, id, url); err != nil {
 			log.Printf("[podcaster] background sync feed %d error: %v", id, err)
 		}
 	}

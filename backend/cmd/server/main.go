@@ -321,13 +321,24 @@ func main() {
 		AllowOriginFunc:  isAllowedOrigin,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: true,
+		AllowCredentials: false,
 	}))
 
-	// API key auth for write operations (POST/PUT/DELETE)
+	// Security headers middleware (BUG-BUILD-7)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Content-Security-Policy", "default-src 'self'")
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// API key auth for write operations (POST/PUT/DELETE) and stream endpoint (GET)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" ||
+				strings.HasPrefix(r.URL.Path, "/api/stream/") {
 				auth.RequireAPIKey(next).ServeHTTP(w, r)
 				return
 			}
