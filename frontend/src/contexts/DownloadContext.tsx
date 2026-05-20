@@ -105,6 +105,11 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
       }
 
       toast.info(`Download started for "${name}"`);
+      // Clear any existing interval for this job to prevent overlapping polls
+      if (pollRef.current[job.id]) {
+        window.clearInterval(pollRef.current[job.id]);
+        delete pollRef.current[job.id];
+      }
       const interval = window.setInterval(async () => {
         try {
           const updated = await api.downloadJob(job.id);
@@ -231,6 +236,11 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
           }
 
           // Case B: Download in progress — poll until done
+          // Clear any existing interval for this job to prevent overlapping polls
+          if (pollRef.current[job.id]) {
+            window.clearInterval(pollRef.current[job.id]);
+            delete pollRef.current[job.id];
+          }
           const interval = window.setInterval(async () => {
             try {
               const updated = await api.downloadJob(job.id);

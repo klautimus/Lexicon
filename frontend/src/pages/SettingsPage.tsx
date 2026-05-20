@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, AlertCircle, RefreshCw, Link2, Unlink } from "lucide-react";
 import { api, SpotifyStatus } from "../lib/api";
+import AppleMusicSettings from "../components/AppleMusicSettings";
 
 export default function SettingsPage() {
   const [status, setStatus] = useState<SpotifyStatus | null>(null);
@@ -156,6 +157,8 @@ export default function SettingsPage() {
           </div>
         )}
       </section>
+
+      <AppleMusicSettings />
     </div>
   );
 }

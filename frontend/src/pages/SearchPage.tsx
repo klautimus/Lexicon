@@ -41,6 +41,9 @@ export default function SearchPage() {
     }
 
     toast.info(`Download started for "${name}"`);
+    if (pollRef.current[job.id]) {
+      window.clearInterval(pollRef.current[job.id]);
+    }
     const interval = window.setInterval(async () => {
       try {
         const updated = await api.downloadJob(job.id);

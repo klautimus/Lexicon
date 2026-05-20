@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown
 } from "lucide-react";
@@ -15,6 +15,15 @@ export default function PodcastsPage() {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [downloadingIds, setDownloadingIds] = useState<Set<number>>(new Set());
+  const pollIntervals = useRef<Map<number, ReturnType<typeof setInterval>>>(new Map());
+
+  // Cleanup all polling intervals on unmount
+  useEffect(() => {
+    return () => {
+      pollIntervals.current.forEach((interval) => clearInterval(interval));
+      pollIntervals.current.clear();
+    };
+  }, []);
 
   const loadFeeds = useCallback(async () => {
     try {
@@ -94,6 +103,9 @@ export default function PodcastsPage() {
       // Long episodes can take a while; allow up to 30 minutes before giving up.
       let attempts = 0;
       const maxAttempts = 600; // 30 minutes at 3s interval
+      // Clear any existing interval for this episode before starting a new one
+      const existing = pollIntervals.current.get(episode.id);
+      if (existing) clearInterval(existing);
       const interval = setInterval(async () => {
         attempts++;
         try {
@@ -106,6 +118,7 @@ export default function PodcastsPage() {
               return next;
             });
             clearInterval(interval);
+            pollIntervals.current.delete(episode.id);
             toast.success(`Downloaded "${episode.title}"`);
           } else if (updated?.download_error) {
             setDownloadingIds((prev) => {
@@ -114,6 +127,7 @@ export default function PodcastsPage() {
               return next;
             });
             clearInterval(interval);
+            pollIntervals.current.delete(episode.id);
             toast.error(`"${episode.title}" failed: ${updated.download_error}`);
           } else if (attempts >= maxAttempts) {
             setDownloadingIds((prev) => {
@@ -122,12 +136,14 @@ export default function PodcastsPage() {
               return next;
             });
             clearInterval(interval);
+            pollIntervals.current.delete(episode.id);
             toast.error(`Download timed out for "${episode.title}" — check Downloads page`);
           }
         } catch {
           // ignore poll errors
         }
       }, 3000);
+      pollIntervals.current.set(episode.id, interval);
     } catch (e: any) {
       toast.error("Download failed: " + e.message);
       setDownloadingIds((prev) => {

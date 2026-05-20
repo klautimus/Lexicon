@@ -56,9 +56,11 @@ export default function DownloadsPage() {
 
   useEffect(() => {
     refresh();
-    pollRef.current = window.setInterval(refresh, 1500);
+    const id = window.setInterval(refresh, 1500);
+    pollRef.current = id;
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      clearInterval(id);
+      pollRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

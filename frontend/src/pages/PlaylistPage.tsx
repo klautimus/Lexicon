@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { api, PlaylistWithTracks, Track } from "../lib/api";
 import { usePlayer } from "../player/PlayerContext";
+import { useToast } from "../contexts/ToastContext";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 function formatDuration(sec: number) {
@@ -25,6 +26,7 @@ export default function PlaylistPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const player = usePlayer();
+  const toast = useToast();
   const [playlist, setPlaylist] = useState<PlaylistWithTracks | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -57,8 +59,8 @@ export default function PlaylistPage() {
     try {
       await api.removeFromPlaylist(Number(id), pos);
       load();
-    } catch {
-      // ignore
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to remove track");
     }
   }
 
@@ -68,8 +70,8 @@ export default function PlaylistPage() {
       await api.updatePlaylist(Number(id), editName.trim());
       setEditing(false);
       load();
-    } catch {
-      // ignore
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save playlist name");
     }
   }
 
@@ -79,8 +81,8 @@ export default function PlaylistPage() {
     try {
       await api.deletePlaylist(Number(id));
       navigate("/playlists");
-    } catch {
-      // ignore
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to delete playlist");
     }
   }
 

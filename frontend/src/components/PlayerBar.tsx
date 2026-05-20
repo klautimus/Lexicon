@@ -124,8 +124,8 @@ export default function PlayerBar() {
         <input
           type="range"
           min={0}
-          max={p.duration || 0}
-          value={p.position}
+          max={p.duration || 1}
+          value={p.duration ? Math.min(p.position, p.duration) : 0}
           onChange={(e) => p.seek(Number(e.target.value))}
           className="flex-1 accent-accent"
           disabled={!t}

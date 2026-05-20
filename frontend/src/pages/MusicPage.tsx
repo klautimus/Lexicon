@@ -77,9 +77,9 @@ export default function MusicPage() {
   const filtered = q
     ? allTracks.filter(
         (t) =>
-          t.title.toLowerCase().includes(q) ||
-          t.artist.toLowerCase().includes(q) ||
-          t.album.toLowerCase().includes(q)
+          (t.title ?? "").toLowerCase().includes(q) ||
+          (t.artist ?? "").toLowerCase().includes(q) ||
+          (t.album ?? "").toLowerCase().includes(q)
       )
     : allTracks;
 

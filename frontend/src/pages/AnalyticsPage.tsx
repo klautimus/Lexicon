@@ -103,7 +103,7 @@ export default function AnalyticsPage() {
                   <td className="px-2 py-1 text-muted">{d}</td>
                   {Array.from({ length: 24 }, (_, h) => {
                     const v = heatLookup.get(`${di}-${h}`) || 0;
-                    const intensity = heatMax ? v / heatMax : 0;
+                    const intensity = heatMax > 0 ? v / heatMax : 0;
                     return (
                       <td key={h} className="p-0">
                         <div

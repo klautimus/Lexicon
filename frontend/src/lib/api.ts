@@ -18,6 +18,9 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(`${r.status} ${text}`);
   }
+  if (r.status === 204) {
+    return undefined as unknown as T;
+  }
   const contentType = r.headers.get("content-type") || "";
   if (contentType.includes("text/html")) {
     const text = await r.text();
@@ -82,6 +85,33 @@ export const api = {
   spotifySync: () =>
     j<{ started: boolean }>("/spotify/sync", { method: "POST" }),
   spotifyToken: () => j<{ access_token: string }>("/spotify/token"),
+
+  // Apple Music
+  appleStatus: () => j<AppleStatus>("/apple/status"),
+  appleSaveConfig: (body: {
+    team_id: string;
+    key_id: string;
+    private_key: string;
+    storefront: string;
+  }) =>
+    j<{ ok: boolean; developer_token: string }>("/apple/config", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  appleDeleteConfig: () =>
+    j<{ ok: boolean }>("/apple/config", { method: "DELETE" }),
+  appleMusicKitConfig: () =>
+    j<AppleMusicKitConfig>("/apple/musickit-config"),
+  appleConnect: (musicUserToken: string) =>
+    j<{ ok: boolean; storefront: string }>("/apple/connect", {
+      method: "POST",
+      body: JSON.stringify({ music_user_token: musicUserToken }),
+    }),
+  appleDisconnect: () =>
+    j<{ ok: boolean }>("/apple/disconnect", { method: "POST" }),
+  appleSync: () =>
+    j<{ started: boolean }>("/apple/sync", { method: "POST" }),
+
   downloadStatus: () => j<DownloadStatus>("/download/status"),
   download: (url: string) =>
     j<DownloadJob>("/download", {
@@ -104,11 +134,11 @@ export const api = {
   updatePlaylist: (id: number, name: string) =>
     j<{ ok: boolean }>(`/playlists/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deletePlaylist: (id: number) =>
-    j<{ ok: boolean }>(`/playlists/${id}`, { method: 'DELETE' }),
+    j<void>(`/playlists/${id}`, { method: 'DELETE' }),
   addToPlaylist: (playlistId: number, trackId: number) =>
     j<{ ok: boolean }>(`/playlists/${playlistId}/tracks`, { method: 'POST', body: JSON.stringify({ track_id: trackId }) }),
   removeFromPlaylist: (playlistId: number, position: number) =>
-    j<{ ok: boolean }>(`/playlists/${playlistId}/tracks/${position}`, { method: 'DELETE' }),
+    j<void>(`/playlists/${playlistId}/tracks/${position}`, { method: 'DELETE' }),
   deleteTrack: (trackId: number) =>
     j<void>(`/library/track/${trackId}`, { method: 'DELETE' }),
 
@@ -124,7 +154,7 @@ export const api = {
   podcastSubscribe: (url: string) =>
     j<PodcastFeed>('/podcasts/subscribe', { method: 'POST', body: JSON.stringify({ url }) }),
   podcastUnsubscribe: (id: number) =>
-    j<{ ok: boolean }>(`/podcasts/feeds/${id}`, { method: 'DELETE' }),
+    j<void>(`/podcasts/feeds/${id}`, { method: 'DELETE' }),
   podcastEpisodes: (feedId: number) =>
     j<PodcastEpisode[]>(`/podcasts/feeds/${feedId}/episodes`),
   podcastSync: (feedId: number) =>
@@ -208,6 +238,23 @@ export interface SpotifyStatus {
   user_id?: string;
   last_synced_at?: number;
   has_playback_sdk: boolean;
+}
+
+export interface AppleStatus {
+  configured: boolean;
+  connected: boolean;
+  team_id?: string;
+  key_id?: string;
+  storefront?: string;
+  display_name?: string;
+  last_synced_at?: number;
+  dev_token_expires_at?: number;
+}
+
+export interface AppleMusicKitConfig {
+  developer_token: string;
+  app_name: string;
+  storefront: string;
 }
 export interface Album {
   album: string;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles, Send, RefreshCw, Library, Download, Loader2, Check, ListMusic } from "lucide-react";
 import { api, RecsPayload, PlaylistPayload } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
@@ -9,6 +9,11 @@ export default function RecsPage() {
   const toast = useToast();
   const player = usePlayer();
   const downloads = useDownloads();
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [recs, setRecs] = useState<RecsPayload | null>(null);
   const [createdAt, setCreatedAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
@@ -19,6 +24,7 @@ export default function RecsPage() {
 
   async function load() {
     const r = await api.recs();
+    if (!mounted.current) return;
     if (!r.empty && r.data) {
       setRecs(r.data);
       setCreatedAt(r.created_at || null);
@@ -32,12 +38,14 @@ export default function RecsPage() {
     setLoading(true);
     try {
       const r = await api.refreshRecs();
+      if (!mounted.current) return;
       setRecs(r);
       setCreatedAt(Math.floor(Date.now() / 1000));
     } catch (e: any) {
-      alert("Failed: " + e.message);
+      if (!mounted.current) return;
+      toast.error("Failed: " + e.message);
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }
 
@@ -50,6 +58,7 @@ export default function RecsPage() {
     setChatBusy(true);
     try {
       const r = await api.chat(msg);
+      if (!mounted.current) return;
       if (r.playlist) {
         // Playlist mode: show conversational message in chat, then render preview
         setChatLog((l) => [...l, { role: "ai", text: r.reply }]);
@@ -59,9 +68,10 @@ export default function RecsPage() {
         setChatLog((l) => [...l, { role: "ai", text: r.reply }]);
       }
     } catch (e: any) {
+      if (!mounted.current) return;
       setChatLog((l) => [...l, { role: "ai", text: "Error: " + e.message }]);
     } finally {
-      setChatBusy(false);
+      if (mounted.current) setChatBusy(false);
     }
   }
 
