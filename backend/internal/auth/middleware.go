@@ -12,7 +12,9 @@ import (
 // An empty value means auth is disabled (all requests pass through unauthenticated).
 var apiKey string
 
-func init() {
+// SetAPIKey sets the API key from the environment. Must be called after
+// godotenv.Load() so that .env values are available.
+func SetAPIKey() {
 	apiKey = os.Getenv("LEXICON_API_KEY")
 }
 

@@ -46,13 +46,14 @@ var distFS embed.FS
 func main() {
 	_ = godotenv.Load()
 
-	// Require LEXICON_API_KEY to be set before starting the server.
-	// Without it, all write endpoints are completely unauthenticated.
-	if !auth.KeyIsSet() {
-		log.Fatalf("[lexicon] FATAL: LEXICON_API_KEY environment variable is not set. Set it before starting the server.")
-	}
-	if auth.KeyLen() < 16 {
-		log.Printf("[lexicon] WARNING: LEXICON_API_KEY is only %d characters — use at least 16 characters for security", auth.KeyLen())
+	// Read API key from environment (now that .env is loaded).
+	auth.SetAPIKey()
+	if auth.KeyIsSet() {
+		if auth.KeyLen() < 16 {
+			log.Printf("[lexicon] WARNING: LEXICON_API_KEY is only %d characters — use at least 16 for security", auth.KeyLen())
+		}
+	} else {
+		log.Printf("[lexicon] WARNING: LEXICON_API_KEY is not set — all endpoints are unauthenticated")
 	}
 
 	cfg := config.Load()
