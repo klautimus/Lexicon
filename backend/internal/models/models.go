@@ -8,6 +8,7 @@ import (
 // Track is the canonical Track type used throughout Lexicon.
 type Track struct {
 	ID                int64   `json:"id"`
+	Path              string  `json:"path"`
 	Title             string  `json:"title"`
 	Artist            string  `json:"artist"`
 	AlbumArtist       string  `json:"album_artist"`
@@ -19,27 +20,32 @@ type Track struct {
 	DurationSec       int     `json:"duration_sec"`
 	MediaKind         string  `json:"media_kind"`
 	Mime              string  `json:"mime"`
-	SpotifyID         string  `json:"spotify_id,omitempty"`
-	ExternalURL       string  `json:"external_url,omitempty"`
+	SizeBytes         int64   `json:"size_bytes"`
+	CoverPath         string  `json:"cover_path,omitempty"`
+	AddedAt           int64   `json:"added_at"`
+	Mtime             int64   `json:"mtime"`
 	LoudnessIntegrated float64 `json:"loudness_integrated,omitempty"`
 	LoudnessTruePeak  float64 `json:"loudness_true_peak,omitempty"`
 	LoudnessRange     float64 `json:"loudness_range,omitempty"`
+	SpotifyID         string  `json:"spotify_id,omitempty"`
+	ExternalURL       string  `json:"external_url,omitempty"`
 }
 
 // TrackCols matches the actual tracks table schema exactly.
 // Column order must match ScanTrack's Scan argument order.
 // Uses raw column names — NULLs are handled by sql.NullString in ScanTrack.
-const TrackCols = `id, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, spotify_id, external_url, loudness_integrated, loudness_true_peak, loudness_range`
+const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url`
 
 // TrackColsAliased returns TrackCols with a table prefix for JOIN queries
 // where column names might be ambiguous (e.g., tracks_fts has title, artist, etc.).
 func TrackColsAliased(alias string) string {
 	cols := []string{
-		"id", "title", "artist", "album_artist", "album",
+		"id", "path", "title", "artist", "album_artist", "album",
 		"track_no", "disc_no", "year", "genre",
 		"duration_sec", "media_kind", "mime",
-		"spotify_id", "external_url",
+		"size_bytes", "cover_path", "added_at", "mtime",
 		"loudness_integrated", "loudness_true_peak", "loudness_range",
+		"spotify_id", "external_url",
 	}
 	for i, c := range cols {
 		cols[i] = alias + "." + c
@@ -53,23 +59,29 @@ func ScanTrack(s interface {
 	Scan(dest ...interface{}) error
 }) (Track, error) {
 	var t Track
-	var title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
+	var path, title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
 	var spotifyID, externalURL sql.NullString
 	var trackNo, discNo, year, durationSec sql.NullInt64
+	var sizeBytes, addedAt, mtime sql.NullInt64
+	var coverPath sql.NullString
 	var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
 
 	err := s.Scan(
 		&t.ID,
-		&title, &artist, &albumArtist, &album,
+		&path, &title, &artist, &albumArtist, &album,
 		&trackNo, &discNo, &year, &genre,
 		&durationSec, &mediaKind, &mime,
-		&spotifyID, &externalURL,
+		&sizeBytes, &coverPath, &addedAt, &mtime,
 		&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
+		&spotifyID, &externalURL,
 	)
 	if err != nil {
 		return t, err
 	}
 
+	if path.Valid {
+		t.Path = path.String
+	}
 	if title.Valid {
 		t.Title = title.String
 	}
@@ -103,11 +115,17 @@ func ScanTrack(s interface {
 	if mime.Valid {
 		t.Mime = mime.String
 	}
-	if spotifyID.Valid {
-		t.SpotifyID = spotifyID.String
+	if sizeBytes.Valid {
+		t.SizeBytes = sizeBytes.Int64
 	}
-	if externalURL.Valid {
-		t.ExternalURL = externalURL.String
+	if coverPath.Valid {
+		t.CoverPath = coverPath.String
+	}
+	if addedAt.Valid {
+		t.AddedAt = addedAt.Int64
+	}
+	if mtime.Valid {
+		t.Mtime = mtime.Int64
 	}
 	if loudnessIntegrated.Valid {
 		t.LoudnessIntegrated = loudnessIntegrated.Float64
@@ -117,6 +135,12 @@ func ScanTrack(s interface {
 	}
 	if loudnessRange.Valid {
 		t.LoudnessRange = loudnessRange.Float64
+	}
+	if spotifyID.Valid {
+		t.SpotifyID = spotifyID.String
+	}
+	if externalURL.Valid {
+		t.ExternalURL = externalURL.String
 	}
 
 	return t, nil

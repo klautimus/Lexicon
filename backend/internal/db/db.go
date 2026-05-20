@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS tracks (
 	media_kind TEXT NOT NULL DEFAULT 'music', -- 'music' | 'podcast'
 	cover_path TEXT,
 	added_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-	mtime INTEGER
+	mtime INTEGER,
+	spotify_id TEXT,
+	external_url TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
@@ -173,10 +175,59 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
 );
 CREATE INDEX IF NOT EXISTS idx_podcast_episodes_feed ON podcast_episodes(feed_id);
 CREATE INDEX IF NOT EXISTS idx_podcast_episodes_downloaded ON podcast_episodes(downloaded);
+
+-- Apple Music integration (v3.4.0)
+-- Credentials are entered via the Settings GUI and stored here so users don't
+-- have to edit .env. The .p8 private key is stored plaintext (local single-user app).
+CREATE TABLE IF NOT EXISTS apple_music_config (
+    id INTEGER PRIMARY KEY CHECK (id=1),
+    team_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    private_key TEXT NOT NULL,
+    storefront TEXT NOT NULL DEFAULT 'us',
+    cached_dev_token TEXT,
+    cached_dev_token_expires_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+-- Apple Music User Token + sync cursor. The MUT comes from MusicKit JS in the
+-- browser; we cannot mint or refresh it server-side. If Apple invalidates it
+-- (user revoked, password change), /v1/me/* calls 401 and the user must
+-- re-authorize via the Settings page.
+CREATE TABLE IF NOT EXISTS apple_music_user (
+    id INTEGER PRIMARY KEY CHECK (id=1),
+    music_user_token TEXT NOT NULL,
+    storefront TEXT NOT NULL,
+    display_name TEXT,
+    last_synced_at INTEGER NOT NULL DEFAULT 0,
+    connected_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 `
+
+// validTables is the set of known database table names, used to sanitize
+// the table argument in PRAGMA queries that do not support parameterization.
+var validTables = map[string]bool{
+	"tracks":           true,
+	"plays":            true,
+	"playlists":        true,
+	"playlist_items":   true,
+	"recommendations":  true,
+	"spotify_tokens":   true,
+	"spotify_pkce":     true,
+	"download_jobs":    true,
+	"podcast_feeds":    true,
+	"podcast_episodes": true,
+	"tracks_fts":       true,
+	"apple_music_config": true,
+	"apple_music_user":   true,
+}
 
 // columnExists returns true if the given column already exists on the table.
 func columnExists(db *sql.DB, table, column string) bool {
+	if !validTables[table] {
+		return false
+	}
 	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return false
@@ -260,6 +311,15 @@ func Migrate(db *sql.DB) error {
 		if _, err := db.Exec(`ALTER TABLE podcast_episodes ADD COLUMN listened INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
+	}
+	// Apple Music: per-track id column + unique partial index (mirrors spotify_id pattern)
+	if !columnExists(db, "tracks", "apple_id") {
+		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN apple_id TEXT`); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_apple ON tracks(apple_id) WHERE apple_id IS NOT NULL`); err != nil {
+		return err
 	}
 	return nil
 }
