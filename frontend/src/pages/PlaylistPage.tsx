@@ -10,10 +10,12 @@ import {
   Music,
   Clock,
   ListMusic,
+  HelpCircle,
 } from "lucide-react";
 import { api, PlaylistWithTracks, Track } from "../lib/api";
 import { usePlayer } from "../player/PlayerContext";
 import { useToast } from "../contexts/ToastContext";
+import { useHelp } from "../contexts/HelpContext";
 import { useIsMobile } from "../hooks/useIsMobile";
 
 function formatDuration(sec: number) {
@@ -27,11 +29,11 @@ export default function PlaylistPage() {
   const navigate = useNavigate();
   const player = usePlayer();
   const toast = useToast();
+  const { showHelp } = useHelp();
   const [playlist, setPlaylist] = useState<PlaylistWithTracks | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
-
   const [error, setError] = useState<string | null>(null);
 
   async function load() {
@@ -187,6 +189,13 @@ export default function PlaylistPage() {
         </div>
       </div>
 
+      <button
+        onClick={() => showHelp("playlist.detail")}
+        className="text-xs text-muted hover:text-accent flex items-center gap-1 transition-colors"
+      >
+        <HelpCircle size={12} /> How to manage this playlist
+      </button>
+
       {playlist.tracks.length === 0 ? (
         <div className="text-center py-12 space-y-2">
           <Music size={40} className="mx-auto text-muted" />
@@ -233,7 +242,7 @@ function PlaylistTrackList({
             <th className="text-left px-4 py-2 w-10">#</th>
             <th className="text-left px-4 py-2">Title</th>
             <th className="text-left px-4 py-2">Artist</th>
-            <th className="text-left px-4 py-2">Album</th>
+            <th className="text-left px-4 py-2 hidden md:table-cell">Album</th>
             <th className="text-left px-4 py-2 w-16">Time</th>
             <th className="text-left px-4 py-2 w-10"></th>
           </tr>
@@ -282,7 +291,7 @@ function DesktopPlaylistTrackRow({
       </td>
       <td className="px-4 py-2 truncate">{track.title}</td>
       <td className="px-4 py-2 text-muted truncate">{track.artist}</td>
-      <td className="px-4 py-2 text-muted truncate">{track.album}</td>
+      <td className="px-4 py-2 text-muted truncate hidden md:table-cell">{track.album}</td>
       <td className="px-4 py-2 text-muted text-xs">
         {formatDuration(track.duration_sec)}
       </td>

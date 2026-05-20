@@ -1,7 +1,8 @@
-import { Play, Pause, SkipBack, SkipForward, Volume2, Shuffle, Repeat, Repeat1 } from "lucide-react";
+import { Play, Pause, SkipBack, SkipForward, Volume2, Shuffle, Repeat, Repeat1, HelpCircle } from "lucide-react";
 import { usePlayer } from "../player/PlayerContext";
 import { api } from "../lib/api";
 import DevicePicker from "./DevicePicker";
+import { useHelp } from "../contexts/HelpContext";
 
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return "0:00";
@@ -12,6 +13,7 @@ function fmt(s: number) {
 
 export default function PlayerBar() {
   const p = usePlayer();
+  const { showHelp } = useHelp();
   const t = p.current;
 
   return (
@@ -113,8 +115,16 @@ export default function PlayerBar() {
         </button>
 
         {/* DevicePicker */}
-        <div className="flex-shrink-0">
+        <div className="flex items-center gap-1 flex-shrink-0">
           <DevicePicker currentTrack={t} />
+          <button
+            onClick={() => showHelp("player.controls")}
+            className="p-1 text-muted/40 hover:text-accent transition-colors"
+            aria-label="Help: Player Controls"
+            title="Player help"
+          >
+            <HelpCircle size={12} />
+          </button>
         </div>
       </div>
 

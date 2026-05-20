@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Music, Download } from "lucide-react";
+import { Music, Download, HelpCircle } from "lucide-react";
 import { api, Track, DownloadJob } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
+import { useHelp } from "../contexts/HelpContext";
 import TrackList from "../components/TrackList";
 
 export default function SearchPage() {
   const toast = useToast();
+  const { showHelp } = useHelp();
   const pollRef = useRef<Record<string, number>>({});
   const [q, setQ] = useState("");
   const [results, setResults] = useState<Track[]>([]);
@@ -85,7 +87,16 @@ export default function SearchPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">Search</h1>
+      <div className="flex items-center gap-2">
+        <h1 className="text-2xl font-semibold">Search</h1>
+        <button
+          onClick={() => showHelp("search.main")}
+          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+          aria-label="Help: Search"
+        >
+          <HelpCircle size={16} />
+        </button>
+      </div>
       <form onSubmit={go} className="flex gap-2">
         <input
           value={q}
@@ -121,9 +132,12 @@ export default function SearchPage() {
             )}
             Search & Download from Web
           </button>
-          <p className="text-xs text-muted">
-            DeepSeek finds metadata → yt-dlp downloads audio
-          </p>
+          <button
+            onClick={() => showHelp("search.download")}
+            className="text-xs text-muted hover:text-accent flex items-center gap-1 mx-auto transition-colors"
+          >
+            <HelpCircle size={12} /> How does this work?
+          </button>
         </div>
       ) : null}
     </div>

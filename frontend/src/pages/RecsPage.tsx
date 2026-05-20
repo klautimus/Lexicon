@@ -1,14 +1,24 @@
 import { useEffect, useRef, useState } from "react";
-import { Sparkles, Send, RefreshCw, Library, Download, Loader2, Check, ListMusic } from "lucide-react";
+import { Sparkles, Send, RefreshCw, Library, Download, Loader2, Check, ListMusic, HelpCircle, MessageSquare, Wand2 } from "lucide-react";
 import { api, RecsPayload, PlaylistPayload } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
 import { usePlayer } from "../player/PlayerContext";
 import { useDownloads } from "../contexts/DownloadContext";
+import { useHelp } from "../contexts/HelpContext";
+
+const EXAMPLE_PROMPTS = [
+  "Make me a playlist for a road trip",
+  "I'm in the mood for 90s grunge",
+  "Something chill for studying",
+  "Find me artists similar to my top plays",
+  "Create a workout playlist with high energy tracks",
+];
 
 export default function RecsPage() {
   const toast = useToast();
   const player = usePlayer();
   const downloads = useDownloads();
+  const { showHelp } = useHelp();
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -60,11 +70,9 @@ export default function RecsPage() {
       const r = await api.chat(msg);
       if (!mounted.current) return;
       if (r.playlist) {
-        // Playlist mode: show conversational message in chat, then render preview
         setChatLog((l) => [...l, { role: "ai", text: r.reply }]);
         downloads.adoptPlaylistPreview(r.playlist);
       } else {
-        // Text mode: normal chat reply
         setChatLog((l) => [...l, { role: "ai", text: r.reply }]);
       }
     } catch (e: any) {
@@ -98,9 +106,18 @@ export default function RecsPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold flex items-center gap-2">
-          <Sparkles className="text-accent" /> Discover
-        </h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-semibold flex items-center gap-2">
+            <Sparkles className="text-accent" /> Discover
+          </h1>
+          <button
+            onClick={() => showHelp("discover.generate")}
+            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            aria-label="Help: Discover"
+          >
+            <HelpCircle size={16} />
+          </button>
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => downloads.generateAiPlaylist(false, trackCount)}
@@ -134,6 +151,13 @@ export default function RecsPage() {
           className="flex-1 accent-accent h-1"
         />
         <span className="text-sm font-medium w-8 text-right">{trackCount}</span>
+        <button
+          onClick={() => showHelp("discover.track-count")}
+          className="p-0.5 text-muted/50 hover:text-accent transition-colors"
+          aria-label="Help: Track Count"
+        >
+          <HelpCircle size={12} />
+        </button>
       </div>
 
       {createdAt && (
@@ -151,74 +175,93 @@ export default function RecsPage() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {recs.items && recs.items.map((it, i) => (
-              <div
-                key={i}
-                className="bg-panel rounded-lg p-4 border border-panel2 hover:border-accent/40 transition"
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <h2 className="text-lg font-semibold">Recommended for You</h2>
+              <button
+                onClick={() => showHelp("discover.recommendations")}
+                className="p-0.5 text-muted/50 hover:text-accent transition-colors"
+                aria-label="Help: Recommendations"
               >
-                <div className="flex items-center justify-between mb-1">
-                  <span
-                    className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded ${
-                      it.type === "library"
-                        ? "bg-accent/20 text-accent"
-                        : "bg-panel2 text-muted"
-                    }`}
-                  >
-                    {it.type === "library" ? "From your library" : "Discover"}
-                  </span>
-                  {it.track_id ? (
-                    <button
-                      onClick={() => playLibraryItem(it.track_id!)}
-                      className="text-xs text-accent hover:underline flex items-center gap-1"
+                <HelpCircle size={14} />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {recs.items && recs.items.map((it, i) => (
+                <div
+                  key={i}
+                  className="bg-panel rounded-lg p-4 border border-panel2 hover:border-accent/40 transition"
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span
+                      className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded ${
+                        it.type === "library"
+                          ? "bg-accent/20 text-accent"
+                          : "bg-panel2 text-muted"
+                      }`}
                     >
-                      <Library size={12} /> Play
-                    </button>
-                  ) : it.type === "discover" ? (
-                    downloads.completedIds.has(`${it.artist} - ${it.title}`) ? (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-green-400 flex items-center gap-1">
-                          <Check size={12} /> Downloaded
-                        </span>
-                        {downloads.completedTrackIds[`${it.artist} - ${it.title}`] && (
-                          <button
-                            onClick={() => playLibraryItem(downloads.completedTrackIds[`${it.artist} - ${it.title}`])}
-                            className="text-xs text-accent hover:underline flex items-center gap-1"
-                          >
-                            <Library size={12} /> Play
-                          </button>
-                        )}
-                      </div>
-                    ) : (
+                      {it.type === "library" ? "From your library" : "Discover"}
+                    </span>
+                    {it.track_id ? (
                       <button
-                        onClick={() => downloads.downloadItem(it.title, it.artist)}
-                        disabled={downloads.downloadingIds.has(`${it.artist} - ${it.title}`)}
-                        className="text-xs text-accent hover:underline flex items-center gap-1 disabled:opacity-50"
+                        onClick={() => playLibraryItem(it.track_id!)}
+                        className="text-xs text-accent hover:underline flex items-center gap-1"
                       >
-                        {downloads.downloadingIds.has(`${it.artist} - ${it.title}`) ? (
-                          <Loader2 size={12} className="animate-spin" />
-                        ) : (
-                          <Download size={12} />
-                        )}
-                        {downloads.downloadingIds.has(`${it.artist} - ${it.title}`)
-                          ? "Downloading…"
-                          : "Download"}
+                        <Library size={12} /> Play
                       </button>
-                    )
-                  ) : null}
+                    ) : it.type === "discover" ? (
+                      downloads.completedIds.has(`${it.artist} - ${it.title}`) ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-green-400 flex items-center gap-1">
+                            <Check size={12} /> Downloaded
+                          </span>
+                          {downloads.completedTrackIds[`${it.artist} - ${it.title}`] && (
+                            <button
+                              onClick={() => playLibraryItem(downloads.completedTrackIds[`${it.artist} - ${it.title}`])}
+                              className="text-xs text-accent hover:underline flex items-center gap-1"
+                            >
+                              <Library size={12} /> Play
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => downloads.downloadItem(it.title, it.artist)}
+                          disabled={downloads.downloadingIds.has(`${it.artist} - ${it.title}`)}
+                          className="text-xs text-accent hover:underline flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {downloads.downloadingIds.has(`${it.artist} - ${it.title}`) ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <Download size={12} />
+                          )}
+                          {downloads.downloadingIds.has(`${it.artist} - ${it.title}`)
+                            ? "Downloading…"
+                            : "Download"}
+                        </button>
+                      )
+                    ) : null}
+                  </div>
+                  <h3 className="font-semibold">{it.title}</h3>
+                  <p className="text-sm text-muted">{it.artist}</p>
+                  <p className="text-sm mt-2 leading-relaxed">{it.reason}</p>
                 </div>
-                <h3 className="font-semibold">{it.title}</h3>
-                <p className="text-sm text-muted">{it.artist}</p>
-                <p className="text-sm mt-2 leading-relaxed">{it.reason}</p>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </>
       ) : (
         <div className="bg-panel rounded-lg p-8 border border-panel2 text-center">
-          <p className="text-muted mb-4">
-            No recommendations yet. Click <strong>Generate</strong> to ask DeepSeek to
-            analyze your listening history and suggest things you'll like.
+          <Sparkles size={32} className="mx-auto text-accent mb-3" />
+          <h2 className="text-lg font-semibold mb-2">Discover New Music</h2>
+          <p className="text-muted mb-4 max-w-md mx-auto">
+            Click <strong>Generate</strong> to ask AI to analyze your listening history
+            and suggest music you'll love. Connect Spotify or Apple Music for even
+            better recommendations.
+          </p>
+          <p className="text-xs text-muted">
+            You can also use the chat below to have a conversation about your taste,
+            create custom playlists, and download any song for free.
           </p>
         </div>
       )}
@@ -241,7 +284,6 @@ export default function RecsPage() {
                   View Playlist
                 </a>
               )}
-              {/* Regenerate button — only shown when playlist preview exists */}
               <button
                 onClick={() => { downloads.generateAiPlaylist(true, trackCount); }}
                 className="text-xs text-gray-400 hover:text-white transition-colors"
@@ -291,10 +333,52 @@ export default function RecsPage() {
         </div>
       )}
 
+      {/* Chat Section — Overhauled */}
       <div className="bg-panel rounded-lg p-5 border border-panel2">
-        <h2 className="text-sm uppercase tracking-wider text-muted mb-3">
-          Chat about your taste
-        </h2>
+        <div className="flex items-center gap-2 mb-2">
+          <MessageSquare size={18} className="text-accent" />
+          <h2 className="text-lg font-semibold">Chat with Lexicon</h2>
+          <button
+            onClick={() => showHelp("discover.chat")}
+            className="p-0.5 text-muted/50 hover:text-accent transition-colors"
+            aria-label="Help: Chat"
+          >
+            <HelpCircle size={14} />
+          </button>
+        </div>
+
+        <div className="bg-bg/50 rounded-lg p-4 mb-4 border border-panel2">
+          <p className="text-sm text-text leading-relaxed mb-2">
+            <strong>Chat with Lexicon's AI</strong> to discover music, create playlists, and download songs — all through natural conversation.
+          </p>
+          <p className="text-xs text-muted leading-relaxed">
+            Lexicon uses DeepSeek AI with knowledge of your listening history
+            {status?.connected ? " and Spotify data" : ""}.
+            {status?.appleConnected ? " and Apple Music data" : ""} Ask for playlists by mood, genre, or activity — then download any track for free.
+          </p>
+        </div>
+
+        {/* Example prompts */}
+        {chatLog.length === 0 && (
+          <div className="mb-4">
+            <p className="text-xs text-muted mb-2">Try one of these:</p>
+            <div className="flex flex-wrap gap-2">
+              {EXAMPLE_PROMPTS.map((prompt, i) => (
+                <button
+                  key={i}
+                  onClick={() => {
+                    setInput(prompt);
+                  }}
+                  className="text-xs px-3 py-1.5 bg-panel2 hover:bg-accent/20 hover:text-accent text-muted rounded-full transition-colors border border-panel2 hover:border-accent/30"
+                >
+                  <Wand2 size={10} className="inline mr-1" />
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-3 max-h-64 overflow-y-auto mb-3">
           {chatLog.map((m, i) => (
             <div
@@ -315,7 +399,7 @@ export default function RecsPage() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask: what should I listen to right now?"
+            placeholder="Ask for a playlist, recommendations, or say 'download that'…"
             className="flex-1 bg-bg border border-panel2 rounded-md px-3 py-2 outline-none focus:border-accent text-sm"
           />
           <button

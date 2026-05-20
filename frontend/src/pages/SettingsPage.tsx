@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { CheckCircle2, AlertCircle, RefreshCw, Link2, Unlink } from "lucide-react";
+import { CheckCircle2, AlertCircle, RefreshCw, Link2, Unlink, HelpCircle } from "lucide-react";
 import { api, SpotifyStatus } from "../lib/api";
 import AppleMusicSettings from "../components/AppleMusicSettings";
+import { useHelp } from "../contexts/HelpContext";
 
 export default function SettingsPage() {
+  const { showHelp } = useHelp();
   const [status, setStatus] = useState<SpotifyStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [params] = useSearchParams();
@@ -42,7 +44,16 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <h1 className="text-2xl font-semibold">Settings</h1>
+      <div className="flex items-center gap-2">
+        <h1 className="text-2xl font-semibold">Settings</h1>
+        <button
+          onClick={() => showHelp("settings.spotify")}
+          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+          aria-label="Help: Settings"
+        >
+          <HelpCircle size={16} />
+        </button>
+      </div>
 
       <section className="bg-panel rounded-lg p-5 border border-panel2 space-y-4">
         <div className="flex items-center justify-between">

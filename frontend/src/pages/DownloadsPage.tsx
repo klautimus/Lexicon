@@ -8,10 +8,13 @@ import {
   X,
   ChevronDown,
   ChevronRight,
+  HelpCircle,
 } from "lucide-react";
 import { api, DownloadJob, DownloadStatus } from "../lib/api";
+import { useHelp } from "../contexts/HelpContext";
 
 export default function DownloadsPage() {
+  const { showHelp } = useHelp();
   const [status, setStatus] = useState<DownloadStatus | null>(null);
   const [mode, setMode] = useState<"url" | "search">("url");
   const [url, setUrl] = useState("");
@@ -24,7 +27,6 @@ export default function DownloadsPage() {
   const pollRef = useRef<number | null>(null);
   const expandedRef = useRef<Record<string, boolean>>(expanded);
 
-  // Keep expandedRef in sync with expanded state
   useEffect(() => {
     expandedRef.current = expanded;
   }, [expanded]);
@@ -37,7 +39,6 @@ export default function DownloadsPage() {
       ]);
       setStatus(s);
       setJobs(j);
-      // Pull full log for any expanded job that's running
       const currentExpanded = expandedRef.current;
       for (const id of Object.keys(currentExpanded)) {
         if (currentExpanded[id]) {
@@ -98,7 +99,16 @@ export default function DownloadsPage() {
 
   return (
     <div className="space-y-6 max-w-4xl">
-      <h1 className="text-2xl font-semibold">Downloads</h1>
+      <div className="flex items-center gap-2">
+        <h1 className="text-2xl font-semibold">Downloads</h1>
+        <button
+          onClick={() => showHelp("downloads.mode")}
+          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+          aria-label="Help: Downloads"
+        >
+          <HelpCircle size={16} />
+        </button>
+      </div>
 
       <section className="bg-panel rounded-lg p-5 border border-panel2 space-y-4">
         {!status ? (
@@ -188,7 +198,7 @@ export default function DownloadsPage() {
                 ) : (
                   <Download size={16} />
                 )}
-                Download
+                <span className="hidden sm:inline">Download</span>
               </button>
             </form>
             {error && (
@@ -213,7 +223,16 @@ export default function DownloadsPage() {
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold mb-3">Recent jobs</h2>
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-lg font-semibold">Recent jobs</h2>
+          <button
+            onClick={() => showHelp("downloads.jobs")}
+            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            aria-label="Help: Download Jobs"
+          >
+            <HelpCircle size={14} />
+          </button>
+        </div>
         {jobs.length === 0 ? (
           <p className="text-sm text-muted">No jobs yet.</p>
         ) : (

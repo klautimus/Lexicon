@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Plus, ListMusic, Clock, Music, Trash2 } from "lucide-react";
+import { Plus, ListMusic, Clock, Music, Trash2, HelpCircle } from "lucide-react";
 import { api, Playlist } from "../lib/api";
+import { useHelp } from "../contexts/HelpContext";
 
 function formatDuration(sec: number) {
   const m = Math.floor(sec / 60);
@@ -11,6 +12,7 @@ function formatDuration(sec: number) {
 }
 
 export default function PlaylistsPage() {
+  const { showHelp } = useHelp();
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -59,7 +61,16 @@ export default function PlaylistsPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Playlists</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-semibold">Playlists</h1>
+          <button
+            onClick={() => showHelp("playlists.grid")}
+            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            aria-label="Help: Playlists"
+          >
+            <HelpCircle size={16} />
+          </button>
+        </div>
       </div>
 
       <form onSubmit={create} className="flex gap-2">
@@ -80,6 +91,12 @@ export default function PlaylistsPage() {
           Create
         </button>
       </form>
+      <button
+        onClick={() => showHelp("playlists.create")}
+        className="text-xs text-muted hover:text-accent flex items-center gap-1 transition-colors"
+      >
+        <HelpCircle size={12} /> How do playlists work?
+      </button>
 
       {loading ? (
         <p className="text-muted">Loading…</p>
@@ -88,7 +105,7 @@ export default function PlaylistsPage() {
           <ListMusic size={40} className="mx-auto text-muted" />
           <p className="text-muted">No playlists yet.</p>
           <p className="text-xs text-muted">
-            Browse your library and add tracks to create your first playlist.
+            Create one above, or generate an AI playlist from the Discover page.
           </p>
         </div>
       ) : (

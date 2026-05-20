@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { api, Stats, RecentPlay } from "../lib/api";
-import { QrCode, Wifi, X, Copy, CheckCircle2, AlertTriangle } from "lucide-react";
+import { QrCode, Wifi, X, Copy, CheckCircle2, AlertTriangle, HelpCircle } from "lucide-react";
+import { useHelp } from "../contexts/HelpContext";
 
 export default function HomePage() {
+  const { showHelp } = useHelp();
   const [stats, setStats] = useState<Stats | null>(null);
   const [recent, setRecent] = useState<RecentPlay[]>([]);
   const [showQr, setShowQr] = useState(false);
@@ -14,13 +16,11 @@ export default function HomePage() {
   useEffect(() => {
     api.stats().then(setStats).catch(() => {});
     api.recent().then(setRecent).catch(() => {});
-    // Detect if accessed from LAN (non-localhost)
     const host = window.location.hostname;
     if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
       setLocalUrl(window.location.origin);
       setShowQr(true);
     }
-    // Fetch server network info for debugging
     fetch("/api/network")
       .then(r => r.json())
       .then(setNetworkInfo)
@@ -32,7 +32,6 @@ export default function HomePage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }).catch(() => {
-      // Fallback: select a hidden textarea for manual copy
       const ta = document.createElement("textarea");
       ta.value = url;
       ta.style.position = "fixed";
@@ -142,20 +141,43 @@ export default function HomePage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Stat label="Tracks" value={stats?.tracks ?? "—"} />
-        <Stat label="Albums" value={stats?.albums ?? "—"} />
-        <Stat label="Artists" value={stats?.artists ?? "—"} />
-        <Stat label="Podcasts" value={stats?.podcasts ?? "—"} />
+      <div>
+        <div className="flex items-center gap-2 mb-4">
+          <h2 className="text-lg font-semibold">Library Stats</h2>
+          <button
+            onClick={() => showHelp("home.stats")}
+            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            aria-label="Help: Library Stats"
+          >
+            <HelpCircle size={14} />
+          </button>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Stat label="Tracks" value={stats?.tracks ?? "—"} />
+          <Stat label="Albums" value={stats?.albums ?? "—"} />
+          <Stat label="Artists" value={stats?.artists ?? "—"} />
+          <Stat label="Podcasts" value={stats?.podcasts ?? "—"} />
+        </div>
       </div>
 
       <div>
-        <h2 className="text-lg font-semibold mb-3">Recently played</h2>
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="text-lg font-semibold">Recently Played</h2>
+          <button
+            onClick={() => showHelp("home.recent")}
+            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            aria-label="Help: Recently Played"
+          >
+            <HelpCircle size={14} />
+          </button>
+        </div>
         {recent.length === 0 ? (
-          <p className="text-muted text-sm">
-            No plays yet — head to <strong>Music</strong> and play something to start
-            building your taste profile.
-          </p>
+          <div className="bg-panel rounded-lg p-6 border border-panel2 text-center">
+            <p className="text-muted text-sm">
+              No plays yet — head to <strong>Music</strong> and play something to start
+              building your taste profile.
+            </p>
+          </div>
         ) : (
           <ul className="divide-y divide-panel2 rounded-lg border border-panel2 overflow-hidden">
             {recent.slice(0, 10).map((r) => (

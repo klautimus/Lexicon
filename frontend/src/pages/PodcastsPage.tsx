@@ -1,14 +1,16 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
-  Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown
+  Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown, HelpCircle
 } from "lucide-react";
 import { api, PodcastFeed, PodcastEpisode, Track } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
 import { usePlayer } from "../player/PlayerContext";
+import { useHelp } from "../contexts/HelpContext";
 
 export default function PodcastsPage() {
   const toast = useToast();
   const player = usePlayer();
+  const { showHelp } = useHelp();
   const [feeds, setFeeds] = useState<PodcastFeed[]>([]);
   const [selectedFeed, setSelectedFeed] = useState<PodcastFeed | null>(null);
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
@@ -199,6 +201,13 @@ export default function PodcastsPage() {
         <h1 className="text-2xl font-semibold flex items-center gap-2">
           <Rss className="text-accent" /> Podcasts
         </h1>
+        <button
+          onClick={() => showHelp("podcasts.feeds")}
+          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+          aria-label="Help: Podcasts"
+        >
+          <HelpCircle size={16} />
+        </button>
         <button
           onClick={() => setShowAddModal(true)}
           className="px-3 py-2 bg-accent text-bg rounded-md font-medium flex items-center gap-2 text-sm"

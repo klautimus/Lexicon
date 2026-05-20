@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Search, Music, Download, RefreshCw } from "lucide-react";
+import { Search, Music, Download, RefreshCw, HelpCircle } from "lucide-react";
 import { api, Track, DownloadJob } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
+import { useHelp } from "../contexts/HelpContext";
 import TrackList from "../components/TrackList";
 
 const PAGE_SIZE = 200;
 
 export default function MusicPage() {
   const toast = useToast();
+  const { showHelp } = useHelp();
   const pollRef = useRef<Record<string, number>>({});
   const [allTracks, setAllTracks] = useState<Track[]>([]);
   const [total, setTotal] = useState(0);
@@ -156,7 +158,6 @@ export default function MusicPage() {
         failed++;
         setUpgradeProgress(`Upgrading: ${done}/${allTracks.length} (${failed} failed)`);
       }
-      // Small delay to avoid overwhelming the download queue
       await new Promise((r) => setTimeout(r, 500));
     }
     setUpgrading(false);
@@ -166,7 +167,16 @@ export default function MusicPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">Music</h1>
+      <div className="flex items-center gap-2">
+        <h1 className="text-2xl font-semibold">Music</h1>
+        <button
+          onClick={() => showHelp("music.library")}
+          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+          aria-label="Help: Music Library"
+        >
+          <HelpCircle size={16} />
+        </button>
+      </div>
 
       <div className="relative">
         <Search
@@ -250,9 +260,12 @@ export default function MusicPage() {
             )}
             Search & Download from Web
           </button>
-          <p className="text-xs text-muted">
-            DeepSeek finds metadata → yt-dlp downloads audio
-          </p>
+          <button
+            onClick={() => showHelp("music.download")}
+            className="text-xs text-muted hover:text-accent flex items-center gap-1 mx-auto transition-colors"
+          >
+            <HelpCircle size={12} /> How does this work?
+          </button>
         </div>
       ) : (
         <p className="text-muted">No tracks.</p>

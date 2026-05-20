@@ -18,11 +18,14 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import { HelpCircle } from "lucide-react";
+import { useHelp } from "../contexts/HelpContext";
 
 const COLORS = ["#e6b450", "#8a6d2f", "#39bae6", "#73d0ff", "#ffa759", "#d4bfff", "#95e6cb", "#f29e74"];
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export default function AnalyticsPage() {
+  const { showHelp } = useHelp();
   const [ov, setOv] = useState<Overview | null>(null);
   const [artists, setArtists] = useState<TopArtist[]>([]);
   const [tracks, setTracks] = useState<TopTrack[]>([]);
@@ -46,7 +49,16 @@ export default function AnalyticsPage() {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-2xl font-semibold">Listening Analytics</h1>
+      <div className="flex items-center gap-2">
+        <h1 className="text-2xl font-semibold">Listening Analytics</h1>
+        <button
+          onClick={() => showHelp("analytics.charts")}
+          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+          aria-label="Help: Analytics"
+        >
+          <HelpCircle size={16} />
+        </button>
+      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Stat label="Total plays" value={ov?.total_plays ?? "—"} />
