@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,6 +46,15 @@ var distFS embed.FS
 func main() {
 	_ = godotenv.Load()
 
+	// Require LEXICON_API_KEY to be set before starting the server.
+	// Without it, all write endpoints are completely unauthenticated.
+	if !auth.KeyIsSet() {
+		log.Fatalf("[lexicon] FATAL: LEXICON_API_KEY environment variable is not set. Set it before starting the server.")
+	}
+	if auth.KeyLen() < 16 {
+		log.Printf("[lexicon] WARNING: LEXICON_API_KEY is only %d characters — use at least 16 characters for security", auth.KeyLen())
+	}
+
 	cfg := config.Load()
 	if cfg.SpotifyFrontendURL == "" {
 		cfg.SpotifyFrontendURL = "http://127.0.0.1:" + cfg.Port
@@ -54,7 +64,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("db open: %v", err)
 	}
-	defer database.Close()
+	// database.Close() is called explicitly in the shutdown handler
+	// after all goroutines have finished, to avoid races.
 
 	if err := db.Migrate(database); err != nil {
 		log.Fatalf("db migrate: %v", err)
@@ -126,8 +137,20 @@ func main() {
 	var (
 		rescanMu       sync.Mutex
 		rescanCancel   context.CancelFunc
-		rescanGen      int // generation counter; incremented on each new rescan
+		rescanGen      atomic.Int64 // generation counter; incremented on each new rescan
 	)
+
+	// shutdown coordination: WaitGroup tracks all long-lived background
+	// goroutines so we can wait for them before closing the database.
+	var (
+		wg          sync.WaitGroup
+		shutdownCtx context.Context
+		shutdown    context.CancelFunc
+	)
+	shutdownCtx, shutdown = context.WithCancel(context.Background())
+
+	// Cancellable context for the initial scan goroutine.
+	initScanCtx, initScanCancel := context.WithCancel(context.Background())
 
 	// Helper closure used by both the rescan endpoint and the downloader.
 	// Only one rescan runs at a time; a new call cancels the previous one.
@@ -139,9 +162,11 @@ func main() {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		rescanCancel = cancel
-		myGen := rescanGen
-		rescanGen++
+		myGen := rescanGen.Add(1) - 1 // capture generation before increment
 		rescanMu.Unlock()
+
+		wg.Add(1)
+		defer wg.Done()
 
 		roots := strings.Split(cfg.MediaRoots, ";")
 		// Always include the podcast output directory so downloaded episodes
@@ -170,7 +195,7 @@ func main() {
 
 		rescanMu.Lock()
 		// Only clear if no new rescan has started since we began.
-		if rescanGen == myGen+1 {
+		if rescanGen.Load() == myGen+1 {
 			rescanCancel = nil
 		}
 		rescanMu.Unlock()
@@ -221,10 +246,17 @@ func main() {
 
 	// WebSocket hub for multi-device playback control
 	wsHub := playerws.New()
-	go wsHub.Run()
-
-	// Initial scan in background
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		wsHub.Run()
+	}()
+
+	// Initial scan in background — uses a cancellable context so shutdown
+	// can abort it, and registers on the WaitGroup so db.Close() waits.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		roots := strings.Split(cfg.MediaRoots, ";")
 		// Include podcast output directory in initial scan
 		if podcastOutput != "" {
@@ -245,7 +277,7 @@ func main() {
 				continue
 			}
 			log.Printf("[scanner] scanning %s", r)
-			if err := scn.ScanRoot(context.Background(), r); err != nil {
+			if err := scn.ScanRoot(initScanCtx, r); err != nil {
 				log.Printf("[scanner] %s: %v", r, err)
 			}
 		}
@@ -402,7 +434,9 @@ func main() {
 		log.Printf("[spotify] redirect_uri=%s", cfg.SpotifyRedirectURI)
 	}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		localIP := getLocalIP()
 		lanURL := "http://" + localIP + ":" + cfg.Port
 		log.Printf("[lexicon] listening on :%s", cfg.Port)
@@ -436,13 +470,42 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 	log.Printf("[lexicon] shutting down...")
+
+	// Shut down HTTP server first to stop accepting new requests.
+	srv.Shutdown(shutdownCtx)
+	shutdown()
+
+	// Shut down subsystems that have their own goroutines.
 	dlAPI.Shutdown()
 	podcastAPI.Shutdown()
 	spotifyAPI.Shutdown()
 	appleAPI.Shutdown()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	srv.Shutdown(ctx)
+	wsHub.Shutdown()
+
+	// Cancel all background contexts to abort in-flight work.
+	rescanMu.Lock()
+	if rescanCancel != nil {
+		rescanCancel()
+	}
+	rescanMu.Unlock()
+	initScanCancel()
+
+	// Wait for all background goroutines to finish, with a timeout.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Printf("[lexicon] all goroutines stopped")
+	case <-time.After(10 * time.Second):
+		log.Printf("[lexicon] WARNING: shutdown timeout — some goroutines still running")
+	}
+
+	// Now safe to close the database — no in-flight queries.
+	database.Close()
+	log.Printf("[lexicon] shutdown complete")
 }
 
 // parseMediaRoots splits the semicolon-separated MEDIA_ROOTS env var into a slice.

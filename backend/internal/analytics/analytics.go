@@ -75,6 +75,12 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	}
 }
 
+func writeError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	type O struct {
 		TotalPlays   int `json:"total_plays"`
@@ -83,12 +89,28 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		CompletedPct int `json:"completed_pct"`
 	}
 	var o O
-	a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plays`).Scan(&o.TotalPlays)
-	a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT track_id) FROM plays`).Scan(&o.UniqueTracks)
-	a.db.QueryRowContext(r.Context(), `SELECT IFNULL(SUM(duration_played_sec),0) FROM plays`).Scan(&o.ListenSec)
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plays`).Scan(&o.TotalPlays); err != nil {
+		log.Printf("[analytics] overview total_plays: %v", err)
+		writeError(w, "failed to load analytics", 500)
+		return
+	}
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT track_id) FROM plays`).Scan(&o.UniqueTracks); err != nil {
+		log.Printf("[analytics] overview unique_tracks: %v", err)
+		writeError(w, "failed to load analytics", 500)
+		return
+	}
+	if err := a.db.QueryRowContext(r.Context(), `SELECT IFNULL(SUM(duration_played_sec),0) FROM plays`).Scan(&o.ListenSec); err != nil {
+		log.Printf("[analytics] overview listen_sec: %v", err)
+		writeError(w, "failed to load analytics", 500)
+		return
+	}
 	if o.TotalPlays > 0 {
 		var c int
-		a.db.QueryRowContext(r.Context(), `SELECT SUM(completed) FROM plays`).Scan(&c)
+		if err := a.db.QueryRowContext(r.Context(), `SELECT SUM(completed) FROM plays`).Scan(&c); err != nil {
+			log.Printf("[analytics] overview completed: %v", err)
+			writeError(w, "failed to load analytics", 500)
+			return
+		}
 		o.CompletedPct = c * 100 / o.TotalPlays
 	}
 	writeJSON(w, o)
@@ -101,7 +123,7 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
 		log.Printf("[analytics] topArtists query: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	defer rows.Close()
@@ -115,14 +137,14 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 		var x Row
 		if err := rows.Scan(&x.Artist, &x.Plays, &x.ListenSec); err != nil {
 			log.Printf("[analytics] topArtists scan: %v", err)
-			http.Error(w, err.Error(), 500)
+			writeError(w, "failed to load data", 500)
 			return
 		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("[analytics] topArtists rows: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	writeJSON(w, out)
@@ -134,7 +156,7 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`)
 	if err != nil {
 		log.Printf("[analytics] topTracks query: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	defer rows.Close()
@@ -147,12 +169,16 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 	out := []Row{}
 	for rows.Next() {
 		var x Row
-		rows.Scan(&x.ID, &x.Title, &x.Artist, &x.Plays)
+		if err := rows.Scan(&x.ID, &x.Title, &x.Artist, &x.Plays); err != nil {
+			log.Printf("[analytics] topTracks scan: %v", err)
+			writeError(w, "failed to load data", 500)
+			return
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("[analytics] topTracks rows: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	writeJSON(w, out)
@@ -164,7 +190,7 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`)
 	if err != nil {
 		log.Printf("[analytics] topGenres query: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	defer rows.Close()
@@ -175,12 +201,16 @@ func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 	out := []Row{}
 	for rows.Next() {
 		var x Row
-		rows.Scan(&x.Genre, &x.Plays)
+		if err := rows.Scan(&x.Genre, &x.Plays); err != nil {
+			log.Printf("[analytics] topGenres scan: %v", err)
+			writeError(w, "failed to load data", 500)
+			return
+		}
 		out = append(out, x)
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("[analytics] topGenres rows: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	writeJSON(w, out)
@@ -194,7 +224,7 @@ func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), q)
 	if err != nil {
 		log.Printf("[analytics] heatmap query: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	defer rows.Close()
@@ -206,12 +236,16 @@ func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
 	out := []Cell{}
 	for rows.Next() {
 		var c Cell
-		rows.Scan(&c.Dow, &c.Hour, &c.Plays)
+		if err := rows.Scan(&c.Dow, &c.Hour, &c.Plays); err != nil {
+			log.Printf("[analytics] heatmap scan: %v", err)
+			writeError(w, "failed to load data", 500)
+			return
+		}
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("[analytics] heatmap rows: %v", err)
-		http.Error(w, err.Error(), 500)
+		writeError(w, "failed to load data", 500)
 		return
 	}
 	writeJSON(w, out)

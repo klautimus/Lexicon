@@ -51,21 +51,16 @@ func (s *Streamer) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Path traversal guard: resolved path must stay within a configured media root
+	// Path traversal guard: resolve symlinks and verify path is within allowed roots
 	if len(s.roots) > 0 {
-		clean := filepath.Clean(path)
-		allowed := false
-		for _, root := range s.roots {
-			if strings.HasPrefix(clean, root+string(os.PathSeparator)) || clean == root {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			log.Printf("[stream] stream track %d: path %s not in media roots", id, path)
+		resolved, err := ValidatePath(path, s.roots)
+		if err != nil {
+			log.Printf("[stream] stream track %d: %v", id, err)
 			http.Error(w, "forbidden", 403)
 			return
 		}
+		// Use the resolved (symlink-expanded) path for the actual file open
+		path = resolved
 	}
 
 	f, err := os.Open(path)

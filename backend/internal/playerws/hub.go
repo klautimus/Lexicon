@@ -64,6 +64,7 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *clientMsg
 	broadcast  chan []byte
+	done       chan struct{}
 	mu         sync.RWMutex
 }
 
@@ -77,12 +78,22 @@ func New() *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *clientMsg),
 		broadcast:  make(chan []byte, 256),
+		done:       make(chan struct{}),
 	}
+}
+
+// Shutdown signals the hub's Run loop to exit.
+func (h *Hub) Shutdown() {
+	close(h.done)
 }
 
 func (h *Hub) Run() {
 	for {
 		select {
+		case <-h.done:
+			log.Printf("[playerws] hub shutdown")
+			return
+
 		case client := <-h.register:
 			h.mu.Lock()
 			// If a new player registers, demote the old one

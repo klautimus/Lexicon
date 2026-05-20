@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/kevin/lexicon/internal/models"
+	streamerpkg "github.com/kevin/lexicon/internal/streamer"
 )
 
 type API struct {
@@ -338,11 +339,16 @@ func (a *API) cover(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "not found", 404)
 		return
 	}
-	// Read embedded art via dhowden/tag
-	if !a.isPathSafe(path) {
-		log.Printf("[library] cover path unsafe id %d path %s", id, path)
-		writeError(w, "forbidden", 403)
-		return
+	// Path traversal guard: resolve symlinks and verify path is within allowed roots
+	if len(a.mediaRoots) > 0 {
+		resolved, err := streamerpkg.ValidatePath(path, a.mediaRoots)
+		if err != nil {
+			log.Printf("[library] cover path rejected id %d path %s: %v", id, path, err)
+			writeError(w, "forbidden", 403)
+			return
+		}
+		// Use the resolved (symlink-expanded) path for the actual file open
+		path = resolved
 	}
 	f, err := openReader(path)
 	if err != nil {

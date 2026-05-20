@@ -1,15 +1,34 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 )
 
+// apiKey is read once at startup from the LEXICON_API_KEY environment variable.
+// An empty value means auth is disabled (all requests pass through unauthenticated).
+var apiKey string
+
+func init() {
+	apiKey = os.Getenv("LEXICON_API_KEY")
+}
+
+// KeyIsSet returns true when an API key has been configured.
+func KeyIsSet() bool {
+	return apiKey != ""
+}
+
+// KeyLen returns the configured key length (0 if unset).
+func KeyLen() int {
+	return len(apiKey)
+}
+
 func RequireAPIKey(next http.Handler) http.Handler {
-	apiKey := os.Getenv("LEXICON_API_KEY")
 	if apiKey == "" {
+		log.Printf("[auth] WARNING: LEXICON_API_KEY is not set — all endpoints are unauthenticated")
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +39,7 @@ func RequireAPIKey(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if token != apiKey {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
 			log.Printf("[auth] invalid API key from %s", r.RemoteAddr)
 			http.Error(w, `{"error":"invalid API key"}`, 401)
 			return
