@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from "react";
-import HelpModal from "./components/HelpModal";
+import HelpModal from "../components/HelpModal";
+import { helpContent } from "../help-content";
 
 interface HelpContextValue {
   showHelp: (key: string) => void;
@@ -27,8 +28,6 @@ export function HelpProvider({ children }: { children: ReactNode }) {
     </HelpContext.Provider>
   );
 }
-
-import { helpContent } from "./help-content";
 
 function HelpModalWrapper({ helpKey, onClose }: { helpKey: string; onClose: () => void }) {
   const entry = helpContent[helpKey];

@@ -352,9 +352,9 @@ export default function RecsPage() {
             <strong>Chat with Lexicon's AI</strong> to discover music, create playlists, and download songs — all through natural conversation.
           </p>
           <p className="text-xs text-muted leading-relaxed">
-            Lexicon uses DeepSeek AI with knowledge of your listening history
-            {status?.connected ? " and Spotify data" : ""}.
-            {status?.appleConnected ? " and Apple Music data" : ""} Ask for playlists by mood, genre, or activity — then download any track for free.
+            Lexicon uses DeepSeek AI with knowledge of your listening history.
+            Connect Spotify or Apple Music for even better recommendations.
+            Ask for playlists by mood, genre, or activity — then download any track for free.
           </p>
         </div>
 
