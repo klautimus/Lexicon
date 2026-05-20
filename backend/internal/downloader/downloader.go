@@ -103,7 +103,15 @@ const (
 	StatusCancelled Status = "cancelled"
 )
 
-const maxLogLines = 500
+const maxLogLines = 1000
+
+// maxBodySize is the maximum allowed size for HTTP request bodies (1 MB).
+const maxBodySize = 1 << 20
+
+// processTimeout is the maximum time a subprocess (spotiflac, yt-dlp, spotdl)
+// is allowed to run before being killed. Hung processes permanently occupy
+// semaphore slots and can deadlock all downloads.
+const processTimeout = 30 * time.Minute
 
 type Job struct {
 	ID         string   `json:"id"`
@@ -147,14 +155,16 @@ type Config struct {
 type RescanFunc func()
 
 type API struct {
-	cfg     Config
-	db      *sql.DB
-	rescan  RescanFunc
-	mu      sync.Mutex
-	sema    chan struct{}
-	jobs    map[string]*Job
-	order   []string
-	maxKeep int
+	cfg            Config
+	db             *sql.DB
+	rescan         RescanFunc
+	mu             sync.Mutex
+	sema           chan struct{}
+	jobs           map[string]*Job
+	order          []string
+	maxKeep        int
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 func New(cfg Config, db *sql.DB, rescan RescanFunc) *API {
@@ -162,18 +172,51 @@ func New(cfg Config, db *sql.DB, rescan RescanFunc) *API {
 	if concurrency <= 0 {
 		concurrency = 2
 	}
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	a := &API{
-		cfg:     cfg,
-		db:      db,
-		rescan:  rescan,
-		jobs:    map[string]*Job{},
-		sema:    make(chan struct{}, concurrency),
-		maxKeep: 50,
+		cfg:            cfg,
+		db:             db,
+		rescan:         rescan,
+		jobs:           map[string]*Job{},
+		sema:           make(chan struct{}, concurrency),
+		maxKeep:        50,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
 	}
 	// Startup recovery: mark any jobs left in 'running' status as failed,
 	// then load the most recent N jobs into memory.
 	a.recoverJobs()
 	return a
+}
+
+// Shutdown signals all in-flight download goroutines to cancel and waits
+// for semaphore slots to drain. Call this before shutting down the HTTP
+// server so that run() / runSearch() goroutines observe the cancelled
+// context and exit promptly instead of running until processTimeout.
+func (a *API) Shutdown() {
+	a.shutdownCancel()
+	// Wait for all semaphore slots to be released, confirming every
+	// in-flight goroutine has returned.
+	for i := 0; i < cap(a.sema); i++ {
+		a.sema <- struct{}{}
+	}
+}
+
+// jobContext returns a context that is cancelled when either the request
+// context is cancelled (client disconnect) or the shutdown context is
+// cancelled (server shutting down). Pass this to run/runSearch so that
+// in-flight downloads are promptly cancelled on shutdown.
+func (a *API) jobContext(reqCtx context.Context) context.Context {
+	ctx, cancel := context.WithCancel(a.shutdownCtx)
+	// Also cancel when the request context is cancelled (client disconnect).
+	go func() {
+		select {
+		case <-reqCtx.Done():
+		case <-a.shutdownCtx.Done():
+		}
+		cancel()
+	}()
+	return ctx
 }
 
 // recoverJobs runs at startup to clean up stale running jobs from a
@@ -243,7 +286,9 @@ func (a *API) Mount(r chi.Router) {
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("[downloader] writeJSON encode: %v", err)
+	}
 }
 
 type statusResponse struct {
@@ -287,7 +332,8 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req enqueueReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[downloader] enqueue decode: %v", err)
 		http.Error(w, err.Error(), 400)
 		return
 	}
@@ -295,6 +341,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(url, "https://open.spotify.com/") &&
 		!strings.HasPrefix(url, "http://open.spotify.com/") &&
 		!strings.HasPrefix(url, "spotify:") {
+		log.Printf("[downloader] enqueue invalid URL: %s", url)
 		http.Error(w, "URL must be a Spotify open.spotify.com URL or spotify: URI", 400)
 		return
 	}
@@ -326,7 +373,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 		a.evictOldJobs()
 	}
 
-	go a.run(job)
+	go a.run(job, a.jobContext(r.Context()))
 	writeJSON(w, jobSummary(job))
 }
 
@@ -400,12 +447,14 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req searchReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[downloader] searchEnqueue decode: %v", err)
 		http.Error(w, err.Error(), 400)
 		return
 	}
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
+		log.Printf("[downloader] searchEnqueue: empty query")
 		http.Error(w, "query is required", 400)
 		return
 	}
@@ -478,7 +527,7 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 		a.evictOldJobs()
 	}
 
-	go a.runSearch(job)
+	go a.runSearch(job, a.jobContext(r.Context()))
 	writeJSON(w, jobSummary(job))
 }
 
@@ -490,7 +539,10 @@ func jobSummary(j *Job) *Job {
 	return &cp
 }
 
-// jobFull returns a deep-ish copy with log included.
+// jobFull returns a deep copy of j with log included.
+// The Log slice is copied to a new backing array so the returned
+// Job is fully independent of the original — safe to use after
+// the source is mutated by another goroutine.
 func jobFull(j *Job) *Job {
 	cp := *j
 	cp.Log = append([]string(nil), j.Log...)
@@ -512,35 +564,51 @@ func (a *API) getJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	a.mu.Lock()
 	j, ok := a.jobs[id]
-	a.mu.Unlock()
 	if !ok {
+		a.mu.Unlock()
+		log.Printf("[downloader] getJob: job %s not found", id)
 		http.Error(w, "not found", 404)
 		return
 	}
-	writeJSON(w, jobFull(j))
+	resp := jobFull(j)
+	a.mu.Unlock()
+	writeJSON(w, resp)
 }
 
 func (a *API) cancelJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
 	a.mu.Lock()
 	j, ok := a.jobs[id]
-	a.mu.Unlock()
 	if !ok {
+		a.mu.Unlock()
+		log.Printf("[downloader] cancelJob: job %s not found", id)
 		http.Error(w, "not found", 404)
 		return
 	}
-	if j.Status == StatusRunning && j.cmd != nil && j.cmd.Process != nil {
-		_ = j.cmd.Process.Kill()
+	if j.Status != StatusQueued && j.Status != StatusRunning {
+		// Already in a terminal state — nothing to cancel.
+		a.mu.Unlock()
+		writeJSON(w, map[string]bool{"ok": true})
+		return
 	}
-	a.mu.Lock()
-	if j.Status == StatusQueued || j.Status == StatusRunning {
-		j.Status = StatusCancelled
-		j.FinishedAt = time.Now().Unix()
-	}
+	// Snapshot the process handle under the lock, then set cancelled status
+	// atomically before releasing. This prevents a race where another goroutine
+	// could observe or modify the job between the status check and the update.
+	proc := j.cmd
+	j.Status = StatusCancelled
+	j.FinishedAt = time.Now().Unix()
+	finishedAt := j.FinishedAt
 	a.mu.Unlock()
+
+	// Kill the subprocess outside the lock (Kill may block).
+	if proc != nil && proc.Process != nil {
+		_ = proc.Process.Kill()
+	}
+
 	// Persist cancellation to DB
 	if a.db != nil {
-		_, _ = a.db.Exec(`UPDATE download_jobs SET status='cancelled', finished_at=? WHERE id=?`, j.FinishedAt, id)
+		_, _ = a.db.Exec(`UPDATE download_jobs SET status='cancelled', finished_at=? WHERE id=?`, finishedAt, id)
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -639,7 +707,7 @@ func (a *API) evictOldJobs() {
 
 // ----- subprocess runner -----
 
-func (a *API) run(job *Job) {
+func (a *API) run(job *Job, ctx context.Context) {
 	// Acquire semaphore slot (blocks until concurrency limit allows)
 	a.sema <- struct{}{}
 	defer func() { <-a.sema }()
@@ -668,7 +736,7 @@ func (a *API) run(job *Job) {
 	}
 	args = append(args, job.URL)
 
-	primaryErr := a.runProcess(job, "spotiflac", a.cfg.Bin, args, "")
+	primaryErr := a.runProcess(job, "spotiflac", a.cfg.Bin, args, ctx)
 
 	// If user cancelled, stop here
 	a.mu.Lock()
@@ -745,7 +813,7 @@ func (a *API) run(job *Job) {
 
 	a.appendLog(job, fmt.Sprintf("[ytdlp] command: %s %s", a.cfg.YtdlpBin, strings.Join(ytdlpArgs, " ")))
 
-	fallbackErr := a.runProcess(job, "ytdlp", a.cfg.YtdlpBin, ytdlpArgs, "")
+	fallbackErr := a.runProcess(job, "ytdlp", a.cfg.YtdlpBin, ytdlpArgs, ctx)
 
 	a.mu.Lock()
 	cancelled := job.Status == StatusCancelled
@@ -758,7 +826,7 @@ func (a *API) run(job *Job) {
 		// Validate downloaded file
 		dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
 		if dlFile != "" {
-			if verr := a.verifyDownloadedFile(dlFile); verr != nil {
+			if verr := a.verifyDownloadedFile(ctx, dlFile); verr != nil {
 				a.appendLog(job, fmt.Sprintf("[verify] file invalid: %s", verr.Error()))
 				a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
 				retrySearch := "ytsearch2:" + strings.TrimPrefix(ytdlpSearch, "ytsearch1:")
@@ -775,15 +843,15 @@ func (a *API) run(job *Job) {
 				if a.cfg.FfmpegBin != "" {
 					retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
 				}
-				retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, "")
-				if retryErr != nil {
-					a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
-					return
-				}
-				retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
-				if retryFile != "" {
-					if verr := a.verifyDownloadedFile(retryFile); verr != nil {
-						a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
+			retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, ctx)
+			if retryErr != nil {
+				a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
+				return
+			}
+			retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+			if retryFile != "" {
+				if verr := a.verifyDownloadedFile(ctx, retryFile); verr != nil {
+					a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
 						return
 					}
 				}
@@ -857,7 +925,7 @@ func (a *API) run(job *Job) {
 
 	a.appendLog(job, fmt.Sprintf("[spotdl] command: %s %s", a.cfg.SpotdlBin, strings.Join(spotdlArgs, " ")))
 
-	spotdlErr := a.runProcess(job, "spotdl", a.cfg.SpotdlBin, spotdlArgs, "")
+	spotdlErr := a.runProcess(job, "spotdl", a.cfg.SpotdlBin, spotdlArgs, ctx)
 
 	a.mu.Lock()
 	cancelled = job.Status == StatusCancelled
@@ -873,7 +941,7 @@ func (a *API) run(job *Job) {
 	// Validate downloaded file
 	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
 	if dlFile != "" {
-		if verr := a.verifyDownloadedFile(dlFile); verr != nil {
+		if verr := a.verifyDownloadedFile(ctx, dlFile); verr != nil {
 			a.finish(job, StatusFailed, fmt.Sprintf("download invalid: %s", verr.Error()))
 			return
 		}
@@ -887,7 +955,7 @@ func (a *API) run(job *Job) {
 // runSearch handles jobs created via /download/search. It skips SpotiFLAC
 // entirely and goes straight to yt-dlp, optionally using DeepSeek to
 // refine the raw user query into a structured search term.
-func (a *API) runSearch(job *Job) {
+func (a *API) runSearch(job *Job, ctx context.Context) {
 	// Acquire semaphore slot (blocks until concurrency limit allows)
 	a.sema <- struct{}{}
 	defer func() { <-a.sema }()
@@ -914,7 +982,7 @@ func (a *API) runSearch(job *Job) {
 	// Try to use DeepSeek to parse the query into a better search term
 	searchQuery := job.URL
 	if a.cfg.DeepSeekAPIKey != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		parsed, err := a.deepseekParseQuery(ctx, job.URL)
 		cancel()
 		if err == nil && parsed.SearchQuery != "" {
@@ -955,7 +1023,7 @@ func (a *API) runSearch(job *Job) {
 
 	a.appendLog(job, fmt.Sprintf("[ytdlp] command: %s %s", a.cfg.YtdlpBin, strings.Join(ytdlpArgs, " ")))
 
-	err := a.runProcess(job, "ytdlp", a.cfg.YtdlpBin, ytdlpArgs, "")
+	err := a.runProcess(job, "ytdlp", a.cfg.YtdlpBin, ytdlpArgs, ctx)
 
 	a.mu.Lock()
 	cancelled := job.Status == StatusCancelled
@@ -972,7 +1040,7 @@ func (a *API) runSearch(job *Job) {
 	// Validate downloaded file
 	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
 	if dlFile != "" {
-		if verr := a.verifyDownloadedFile(dlFile); verr != nil {
+		if verr := a.verifyDownloadedFile(ctx, dlFile); verr != nil {
 			a.appendLog(job, fmt.Sprintf("[verify] file invalid: %s", verr.Error()))
 			a.appendLog(job, "[verify] retrying with ytsearch2 and m4a format...")
 			retrySearch := "ytsearch2:" + strings.TrimPrefix(job.URL, "ytsearch1:")
@@ -989,14 +1057,14 @@ func (a *API) runSearch(job *Job) {
 			if a.cfg.FfmpegBin != "" {
 				retryArgs = append(retryArgs, "--ffmpeg-location", a.cfg.FfmpegBin)
 			}
-			retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, "")
+			retryErr := a.runProcess(job, "ytdlp-retry", a.cfg.YtdlpBin, retryArgs, ctx)
 			if retryErr != nil {
 				a.finish(job, StatusFailed, fmt.Sprintf("download invalid and retry failed: %s", retryErr.Error()))
 				return
 			}
 			retryFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
 			if retryFile != "" {
-				if verr := a.verifyDownloadedFile(retryFile); verr != nil {
+				if verr := a.verifyDownloadedFile(ctx, retryFile); verr != nil {
 					a.finish(job, StatusFailed, fmt.Sprintf("download invalid, retry also invalid: %s", verr.Error()))
 					return
 				}
@@ -1014,6 +1082,9 @@ func (a *API) runSearch(job *Job) {
 	// checking for a track whose path matches the downloaded file.
 	if a.db != nil {
 		go func() {
+			pollCtx, pollCancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer pollCancel()
+
 			dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
 			if dlFile == "" {
 				return
@@ -1021,7 +1092,7 @@ func (a *API) runSearch(job *Job) {
 			for i := 0; i < 40; i++ {
 				time.Sleep(3 * time.Second)
 				var id int64
-				err := a.db.QueryRowContext(context.Background(),
+				err := a.db.QueryRowContext(pollCtx,
 					`SELECT id FROM tracks WHERE path=? LIMIT 1`, dlFile).Scan(&id)
 				if err == nil && id > 0 {
 					a.mu.Lock()
@@ -1030,17 +1101,23 @@ func (a *API) runSearch(job *Job) {
 					log.Printf("[downloader] runSearch: resolved track %d for %s", id, dlFile)
 					return
 				}
+				if pollCtx.Err() != nil {
+					log.Printf("[downloader] runSearch: track resolution cancelled for %s: %v", dlFile, pollCtx.Err())
+					return
+				}
 			}
 			log.Printf("[downloader] runSearch: could not resolve track for %s after 2min", dlFile)
 		}()
 	}
 }
 
-// runProcess starts a subprocess, streams its stdout+stderr into the job log,
+	// runProcess starts a subprocess, streams its stdout+stderr into the job log,
 // and waits for it. The logPrefix is prepended to every log line so the user
 // can see which tool produced what output.
-func (a *API) runProcess(job *Job, logPrefix, bin string, args []string, _ string) error {
-	cmd := exec.Command(bin, args...)
+func (a *API) runProcess(job *Job, logPrefix, bin string, args []string, ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, processTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -1099,7 +1176,7 @@ func isValidAudioFile(path string) bool {
 	return strings.HasPrefix(mime, "audio/")
 }
 
-func (a *API) verifyDownloadedFile(path string) error {
+func (a *API) verifyDownloadedFile(ctx context.Context, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
@@ -1108,7 +1185,7 @@ func (a *API) verifyDownloadedFile(path string) error {
 		return fmt.Errorf("file too small (%d bytes)", info.Size())
 	}
 	if a.cfg.FfprobeBin != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, a.cfg.FfprobeBin,
 			"-v", "error",
@@ -1155,12 +1232,12 @@ func (a *API) findDownloadedFile(before time.Time) string {
 // validateOutput checks whether the downloaded file is a valid audio file.
 // It searches the output directory for recently created audio files and
 // validates them with ffprobe. Returns an error string if validation fails.
-func (a *API) validateOutput(job *Job) string {
+func (a *API) validateOutput(ctx context.Context, job *Job) string {
 	dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
 	if dlFile == "" {
 		return "no audio file found in output directory"
 	}
-	if err := a.verifyDownloadedFile(dlFile); err != nil {
+	if err := a.verifyDownloadedFile(ctx, dlFile); err != nil {
 		return err.Error()
 	}
 	return ""
@@ -1313,11 +1390,13 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req upgradeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[downloader] upgradeTrack decode: %v", err)
 		http.Error(w, err.Error(), 400)
 		return
 	}
 	if req.TrackID <= 0 {
+		log.Printf("[downloader] upgradeTrack: invalid track_id %d", req.TrackID)
 		http.Error(w, "track_id is required", 400)
 		return
 	}
@@ -1329,9 +1408,11 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 		req.TrackID).Scan(&oldPath, &title, &artist)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			log.Printf("[downloader] upgradeTrack: track %d not found", req.TrackID)
 			http.Error(w, "track not found", 404)
 			return
 		}
+		log.Printf("[downloader] upgradeTrack: lookup track %d: %v", req.TrackID, err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -1378,7 +1459,7 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.TrackID)
 	}
 
-	go a.runSearchWithTrackID(job, req.TrackID)
+	go a.runSearchWithTrackID(job, req.TrackID, a.jobContext(r.Context()))
 	writeJSON(w, map[string]interface{}{
 		"job_id":  job.ID,
 		"query":   query,
@@ -1388,9 +1469,9 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 }
 
 // runSearchWithTrackID is like runSearch but updates the track's path after download.
-func (a *API) runSearchWithTrackID(job *Job, trackID int64) {
+func (a *API) runSearchWithTrackID(job *Job, trackID int64, ctx context.Context) {
 	// Run the standard search pipeline
-	a.runSearch(job)
+	a.runSearch(job, ctx)
 
 	// If successful, update the track's file path
 	a.mu.Lock()
@@ -1461,7 +1542,8 @@ func fileSize(path string) int64 {
 // upgradeAll enqueues all music tracks for upgrade.
 func (a *API) upgradeAll(w http.ResponseWriter, r *http.Request) {
 	var req upgradeAllReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[downloader] upgradeAll decode: %v", err)
 		http.Error(w, err.Error(), 400)
 		return
 	}
@@ -1470,6 +1552,7 @@ func (a *API) upgradeAll(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id FROM tracks WHERE media_kind='music' ORDER BY id`
 	rows, err := a.db.QueryContext(r.Context(), query)
 	if err != nil {
+		log.Printf("[downloader] upgradeAll query: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
 	}
