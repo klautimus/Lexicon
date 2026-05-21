@@ -223,6 +223,7 @@ func main() {
 
 	dlAPI := downloader.New(downloader.Config{
 		Bin:                 cfg.SpotiflacBin,
+		SpotiflacService:    cfg.SpotiflacService,
 		Output:              dlOutput,
 		FolderFormat:        cfg.SpotiflacFolderFmt,
 		SpotdlBin:           cfg.SpotdlBin,

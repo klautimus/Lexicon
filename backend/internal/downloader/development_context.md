@@ -1,6 +1,6 @@
 # Downloader Package — Development Context
 
-**Last updated**: 2026-05-19
+**Last updated**: 2026-05-20
 
 ## Overview
 
@@ -103,9 +103,46 @@ The `Job` struct gained a `Kind` field (`"music"` or `"podcast"`) and three new 
 
 These methods don't acquire the concurrency semaphore or trigger rescan — the external caller handles those. The DB schema gained a `kind TEXT NOT NULL DEFAULT 'music'` column with idempotent migration.
 
-## Phase 6: Post-Download Track Resolution (v3.3.5)
+## Phase 7: Spotify Search API Fallback (v3.5.3)
 
 ### Problem
+In `runSearch()`, the download pipeline relied entirely on yt-dlp (YouTube) for search-based downloads. The LLM's `deepseekParseQuery` could optionally return a Spotify URL, but there was no integration with Spotify's search API to find track URLs when the LLM was uncertain.
+
+### Changes Made
+
+#### New Functions
+- **`spotifySearch(query string) (string, error)`** — Searches the Spotify Web API for a track matching the query. Uses Client Credentials flow with a cached access token (1-hour lifetime, refresh 1 minute early). Returns the Spotify track URL (e.g. `https://open.spotify.com/track/xxx`) or empty string. Handles 401 token expiry with a single retry.
+
+- **`spotifyGetToken() (string, int, error)`** — Obtains an access token via Spotify's Client Credentials OAuth flow (`POST /api/token` with `grant_type=client_credentials` and Basic auth).
+
+- **`httpClient() *http.Client`** — Shared HTTP client with 30-second timeout for external API calls.
+
+#### Modified Structs
+- **`deepseekMetadata`** — Added `SpotifyURL` field (`spotify_url` JSON tag) for the LLM to optionally return a known track URL.
+
+- **`API` struct** — Added `spotifyToken`, `spotifyTokenExpiry`, and `spotifyTokenMu` fields for caching the Client Credentials access token.
+
+#### Modified Functions
+- **`deepseekParseQuery()`** — Updated the prompt to request `spotify_url` in the JSON output with strict validation rules (only return URL if highly confident, never guess).
+
+- **`runSearch()`** — Added a Spotify URL resolution + SpotiFLAC first-attempt block after DeepSeek parsing:
+  1. Check if LLM returned a `spotify_url` → use directly
+  2. If not, call `spotifySearch()` with the search query as fallback
+  3. If a Spotify URL is obtained, attempt SpotiFLAC download before falling through to yt-dlp
+  4. If SpotiFLAC succeeds (validated by ffprobe), finish the job early
+  5. If SpotiFLAC fails, fall through to the existing yt-dlp pipeline
+
+### Flow
+```
+DeepSeek → parsed.SpotifyURL? → yes → use it
+                                 → no  → spotifySearch(query)
+                                            → found → try SpotiFLAC
+                                                         → success → done
+                                                         → fail → yt-dlp
+                                            → no results → yt-dlp (existing pipeline)
+```
+## Phase 6: Post-Download Track Resolution (v3.3.5)
+
 AI playlist creation had a race condition: after yt-dlp downloaded a file, the async rescan hadn't indexed it yet when the frontend tried to find the track in the library. This caused tracks to be added to the playlist with wrong IDs or marked as failed.
 
 ### Changes Made

@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,14 +30,17 @@ import (
 	"github.com/kevin/lexicon/internal/recommender"
 )
 
-// Spotiflac exits with status 0 even when every track failed. We parse its
-// summary line to detect "soft" failures and trigger the spotDL fallback.
+// The new SpotiFLAC binary (v2, subcommand-based) exits non-zero on failure
+// and does NOT print a "Summary:" line. The old summary-parsing logic is
+// kept for backward compatibility with the old binary but is no longer the
+// primary failure detection path.
 //
-//	Summary: 0 Success, 1 Failed. Output dir: ...
+//	Summary: 0 Success, 1 Failed. Output dir: ...  (old binary only)
 var spotiflacSummaryRE = regexp.MustCompile(`Summary:\s*(\d+)\s*Success,\s*(\d+)\s*Failed`)
 
 // spotiflacReportedFailure returns (true, summaryLine) if the job's log shows
 // a Summary line where Success == 0 and Failed > 0.
+// Deprecated: the new binary exits non-zero instead of printing a summary.
 func spotiflacReportedFailure(log []string) (bool, string) {
 	// Scan from the end — summary is always last.
 	for i := len(log) - 1; i >= 0; i-- {
@@ -48,27 +53,23 @@ func spotiflacReportedFailure(log []string) (bool, string) {
 		if success == 0 && failed > 0 {
 			return true, log[i]
 		}
-		return false, ""
 	}
 	return false, ""
 }
 
-// Spotiflac prints "Found Track: Title - Artist" (no parens, no errors) for
-// single-track URLs — the cleanest source of metadata to extract.
-var spotiflacFoundTrackRE = regexp.MustCompile(`Found Track:\s+(.+?)\r?\n`)
+// New binary (v2) prints per-track progress lines:
+//
+//	[1/5] Track Name - Artist
+var spotiflacProgressRE = regexp.MustCompile(`\[(\d+)/(\d+)\]\s+(.+?)\s*$`)
 
-// Per-track failure line: "[1/1] Failed: Title - Artist (error_text)". The
-// error_text portion can contain nested parens (e.g. context deadline
-// exceeded (Client.Timeout exceeded)), so we use a lazy match terminated by
-// the first " (" to capture the Title-Artist segment. This may truncate a
-// track title that itself contains "(", but that's acceptable — spotDL's
-// fuzzy search handles partial queries well.
-var spotiflacFailedTrackRE = regexp.MustCompile(`\[\d+/\d+\]\s+Failed:\s+(.+?)\s+\(`)
+// New binary prints failure lines:
+//
+//	Unable to download Track Name - Artist
+var spotiflacFailedTrackRE = regexp.MustCompile(`Unable to download\s+(.+?)\s*$`)
 
 // extractFailedTrackQueries returns deduped "Title - Artist" strings parsed
-// from spotiflac output. It prefers "Found Track:" lines (cleanest) but
-// falls back to "[N/M] Failed:" lines for albums/playlists where per-track
-// "Found Track:" lines aren't printed.
+// from spotiflac output. It matches the new v2 progress lines "[1/5] Track - Artist"
+// and failure lines "Unable to download Track - Artist".
 func extractFailedTrackQueries(log []string) []string {
 	seen := map[string]bool{}
 	out := []string{}
@@ -84,10 +85,12 @@ func extractFailedTrackQueries(log []string) []string {
 		out = append(out, q)
 	}
 	for _, line := range log {
-		if m := spotiflacFoundTrackRE.FindStringSubmatch(line); m != nil {
-			add(m[1])
+		// New v2 binary: "[1/5] Track Name - Artist" progress lines
+		if m := spotiflacProgressRE.FindStringSubmatch(line); m != nil {
+			add(m[3])
 			continue
 		}
+		// New v2 binary: "Unable to download Track Name - Artist" failure lines
 		if m := spotiflacFailedTrackRE.FindStringSubmatch(line); m != nil {
 			add(m[1])
 		}
@@ -136,7 +139,8 @@ type Job struct {
 type Config struct {
 	Bin          string // SpotiFLAC binary
 	Output       string
-	FolderFormat string
+	FolderFormat string // deprecated: new binary ignores this
+	SpotiflacService string // qobuz (default), amazon, tidal
 	SpotdlBin           string // spotDL binary (fallback)
 	SpotdlFormat        string // mp3, flac, ogg, opus, m4a, wav
 	SpotdlAudio         string // comma-separated audio providers (e.g. "piped,youtube")
@@ -170,6 +174,11 @@ type API struct {
 	// fileCache caches directory listings for findDownloadedFile
 	fileCache     map[string]fileCacheEntry
 	fileCacheTime time.Time
+
+	// Spotify search API token cache
+	spotifyToken       string
+	spotifyTokenExpiry time.Time
+	spotifyTokenMu     sync.Mutex
 }
 
 type fileCacheEntry struct {
@@ -723,9 +732,12 @@ func (a *API) run(job *Job, ctx context.Context) {
 	}
 
 	a.appendLog(job, "[spotiflac] starting download")
-	args := []string{"-o", a.cfg.Output}
+	args := []string{"download", "-o", a.cfg.Output}
 	if a.cfg.FolderFormat != "" {
 		args = append(args, "-folder-format", a.cfg.FolderFormat)
+	}
+	if a.cfg.SpotiflacService != "" {
+		args = append(args, "-s", a.cfg.SpotiflacService)
 	}
 	args = append(args, job.URL)
 
@@ -974,15 +986,96 @@ func (a *API) runSearch(job *Job, ctx context.Context) {
 
 	// Try to use DeepSeek to parse the query into a better search term
 	searchQuery := job.URL
+	var parsed deepseekMetadata
+	var parsedOK bool
 	if a.cfg.DeepSeekAPIKey != "" {
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		parsed, err := a.deepseekParseQuery(ctx, job.URL)
+		dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		p, err := a.deepseekParseQuery(dctx, job.URL)
 		cancel()
-		if err == nil && parsed.SearchQuery != "" {
-			searchQuery = parsed.SearchQuery
-			a.appendLog(job, fmt.Sprintf("[search] DeepSeek parsed: artist=%q title=%q type=%s", parsed.Artist, parsed.Title, parsed.Type))
+		if err == nil && p.SearchQuery != "" {
+			searchQuery = p.SearchQuery
+			parsed = p
+			parsedOK = true
+			a.appendLog(job, fmt.Sprintf("[search] DeepSeek parsed: artist=%q title=%q type=%s", p.Artist, p.Title, p.Type))
 		} else if err != nil {
 			a.appendLog(job, fmt.Sprintf("[search] DeepSeek parse failed (%s), using raw query", err.Error()))
+		}
+	}
+
+	// --- Spotify URL resolution and SpotiFLAC first-attempt fallback ---
+	// When the LLM doesn't know the Spotify URL, fall back to the Spotify Web API
+	// search (Client Credentials flow). If we get a URL, try SpotiFLAC before yt-dlp.
+	var spotifyURL string
+	if parsedOK && parsed.SpotifyURL != "" {
+		spotifyURL = parsed.SpotifyURL
+		a.appendLog(job, fmt.Sprintf("[search] LLM provided Spotify URL: %s", spotifyURL))
+	}
+	if spotifyURL == "" && a.cfg.SpotifyClientID != "" && a.cfg.SpotifyClientSecret != "" {
+		result, err := a.spotifySearch(searchQuery)
+		if err != nil {
+			a.appendLog(job, fmt.Sprintf("[search] Spotify API search failed: %s", err.Error()))
+		} else if result != "" {
+			spotifyURL = result
+			a.appendLog(job, fmt.Sprintf("[search] Spotify API found: %s", spotifyURL))
+		} else {
+			a.appendLog(job, "[search] Spotify API: no results")
+		}
+	}
+	if spotifyURL != "" && a.cfg.Bin != "" {
+		a.appendLog(job, fmt.Sprintf("[search] attempting SpotiFLAC with %s", spotifyURL))
+		sfArgs := []string{"download", "-o", a.cfg.Output}
+		if a.cfg.FolderFormat != "" {
+			sfArgs = append(sfArgs, "-folder-format", a.cfg.FolderFormat)
+		}
+		if a.cfg.SpotiflacService != "" {
+			sfArgs = append(sfArgs, "-s", a.cfg.SpotiflacService)
+		}
+		sfArgs = append(sfArgs, spotifyURL)
+		sfErr := a.runProcess(job, "spotiflac", a.cfg.Bin, sfArgs, ctx)
+		if sfErr == nil {
+			// SpotiFLAC always exits 0 — check for soft failures via summary
+			a.mu.Lock()
+			logCopy := append([]string(nil), job.Log...)
+			cancelled := job.Status == StatusCancelled
+			a.mu.Unlock()
+			if cancelled {
+				return
+			}
+			if soft, summary := spotiflacReportedFailure(logCopy); soft {
+				sfErr = fmt.Errorf("%s", summary)
+			}
+		}
+		a.mu.Lock()
+		cancelled := job.Status == StatusCancelled
+		a.mu.Unlock()
+		if cancelled {
+			return
+		}
+		if sfErr == nil {
+			// SpotiFLAC succeeded — validate and finish
+			dlFile := a.findDownloadedFile(time.Unix(job.StartedAt, 0))
+			if dlFile != "" {
+				verr := a.verifyDownloadedFile(ctx, dlFile)
+				if verr == nil {
+					if a.rescan != nil {
+						go a.rescan()
+					}
+					a.finish(job, StatusSucceeded, "")
+					return
+				}
+				a.appendLog(job, fmt.Sprintf("[verify] SpotiFLAC output invalid: %s", verr.Error()))
+			} else {
+				a.appendLog(job, "[spotiflac] process exited clean but no file found in output dir")
+			}
+		} else {
+			a.appendLog(job, fmt.Sprintf("[spotiflac] failed: %s, falling through to yt-dlp", sfErr.Error()))
+		}
+		// Reset tool label for the yt-dlp phase
+		a.mu.Lock()
+		job.Tool = "ytdlp-search"
+		a.mu.Unlock()
+		if a.db != nil {
+			_, _ = a.db.Exec(`UPDATE download_jobs SET tool='ytdlp-search' WHERE id=?`, job.ID)
 		}
 	}
 
@@ -1307,6 +1400,7 @@ type deepseekMetadata struct {
 	Title       string `json:"title"`
 	Album       string `json:"album"`
 	SearchQuery string `json:"search_query"`
+	SpotifyURL  string `json:"spotify_url"`
 }
 
 func (a *API) deepseekParseQuery(ctx context.Context, query string) (deepseekMetadata, error) {
@@ -1323,7 +1417,8 @@ Return ONLY valid JSON with this exact shape:
   "artist": "...",
   "title": "...",
   "album": "...",
-  "search_query": "best yt-dlp search string"
+  "search_query": "best yt-dlp search string",
+  "spotify_url": "https://open.spotify.com/track/xxx or empty string"
 }
 
 Rules for search_query:
@@ -1334,6 +1429,12 @@ Rules for search_query:
   - "The Beatles - Hey Jude - Topic"
 - For podcasts, just use the show and episode name, no extra words needed
 - Keep the query concise but effective
+
+Rules for spotify_url:
+- If you know the Spotify track URL for this song, include it (e.g. "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT")
+- ONLY include a URL if you are highly confident it's the correct track
+- If unsure, set spotify_url to "" (empty string)
+- NEVER invent or guess a Spotify URL
 
 If the query is ambiguous, make your best guess. Output ONLY JSON, no markdown.`, query)
 
@@ -1392,6 +1493,135 @@ If the query is ambiguous, make your best guess. Output ONLY JSON, no markdown.`
 		return deepseekMetadata{}, err
 	}
 	return out, nil
+}
+
+// spotifySearch searches the Spotify Web API for a track matching the query
+// and returns the Spotify track URL (e.g. "https://open.spotify.com/track/xxx").
+// Uses Client Credentials flow with a cached access token (1-hour lifetime).
+// Returns empty string if no results or if Spotify credentials are not configured.
+func (a *API) spotifySearch(query string) (string, error) {
+	if a.cfg.SpotifyClientID == "" || a.cfg.SpotifyClientSecret == "" {
+		return "", fmt.Errorf("Spotify credentials not configured")
+	}
+
+	// Check token cache
+	a.spotifyTokenMu.Lock()
+	token := a.spotifyToken
+	expiry := a.spotifyTokenExpiry
+	a.spotifyTokenMu.Unlock()
+
+	if token == "" || time.Now().After(expiry) {
+		// Get a new token via Client Credentials flow
+		newToken, expiresIn, err := a.spotifyGetToken()
+		if err != nil {
+			return "", fmt.Errorf("spotify token: %w", err)
+		}
+		a.spotifyTokenMu.Lock()
+		a.spotifyToken = newToken
+		a.spotifyTokenExpiry = time.Now().Add(time.Duration(expiresIn-60) * time.Second) // refresh 1min early
+		a.spotifyTokenMu.Unlock()
+		token = newToken
+	}
+
+	// Search for the track
+	req, err := http.NewRequest("GET",
+		fmt.Sprintf("https://api.spotify.com/v1/search?q=%s&type=track&limit=1", url.QueryEscape(query)),
+		nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := a.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("spotify search: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 {
+		// Token expired — invalidate cache and retry once
+		a.spotifyTokenMu.Lock()
+		a.spotifyToken = ""
+		a.spotifyTokenExpiry = time.Time{}
+		a.spotifyTokenMu.Unlock()
+		return a.spotifySearch(query)
+	}
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("spotify search %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Tracks struct {
+			Items []struct {
+				ExternalURLs struct {
+					Spotify string `json:"spotify"`
+				} `json:"external_urls"`
+				Name    string `json:"name"`
+				Artists []struct {
+					Name string `json:"name"`
+				} `json:"artists"`
+				Album struct {
+					Name string `json:"name"`
+				} `json:"album"`
+			} `json:"items"`
+		} `json:"tracks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("spotify decode: %w", err)
+	}
+
+	if len(result.Tracks.Items) == 0 {
+		return "", nil // no results
+	}
+
+	return result.Tracks.Items[0].ExternalURLs.Spotify, nil
+}
+
+// spotifyGetToken obtains an access token via Spotify Client Credentials flow.
+// Returns the token string and its lifetime in seconds.
+func (a *API) spotifyGetToken() (string, int, error) {
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	req, err := http.NewRequest("POST", "https://accounts.spotify.com/api/token",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString(
+		[]byte(a.cfg.SpotifyClientID+":"+a.cfg.SpotifyClientSecret)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.httpClient().Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", 0, fmt.Errorf("spotify auth %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", 0, fmt.Errorf("spotify auth decode: %w", err)
+	}
+	if result.AccessToken == "" {
+		return "", 0, fmt.Errorf("spotify auth: empty access token")
+	}
+	return result.AccessToken, result.ExpiresIn, nil
+}
+
+// httpClient returns a shared HTTP client with a 30-second timeout for
+// external API calls (Spotify, DeepSeek, etc.).
+func (a *API) httpClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second}
 }
 
 // ----- Track upgrade (re-download with new pipeline) -----

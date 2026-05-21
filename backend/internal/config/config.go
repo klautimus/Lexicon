@@ -22,6 +22,7 @@ type Config struct {
 	SpotiflacBin       string
 	SpotiflacOutput    string
 	SpotiflacFolderFmt string
+	SpotiflacService   string
 	SpotdlBin          string
 	SpotdlFormat       string
 	SpotdlAudio        string
@@ -54,6 +55,7 @@ func Load() (Config, error) {
 		SpotdlFormat:       env("SPOTDL_FORMAT", "mp3"),
 		SpotiflacOutput:    env("SPOTIFLAC_OUTPUT", ""),
 		SpotiflacFolderFmt: env("SPOTIFLAC_FOLDER_FORMAT", ""),
+		SpotiflacService:   env("SPOTIFLAC_SERVICE", "qobuz"),
 		SpotdlAudio:        env("SPOTDL_AUDIO_PROVIDERS", "piped,youtube,soundcloud,bandcamp"),
 		YtdlpBin:           env("YTDLP_BIN", ""),
 		YtdlpFormat:        env("YTDLP_FORMAT", "opus"),
