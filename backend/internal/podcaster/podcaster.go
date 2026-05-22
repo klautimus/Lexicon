@@ -33,6 +33,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mmcdole/gofeed"
 
+	"github.com/kevin/lexicon/internal/auth"
 	"github.com/kevin/lexicon/internal/downloader"
 )
 
@@ -64,6 +65,15 @@ type API struct {
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 	inflight       atomic.Int64      // in-flight download count for status API
+}
+
+// getUserID extracts the authenticated user ID from the request context.
+// Returns 0 when no user is authenticated (backward compatibility).
+func getUserID(r *http.Request) int64 {
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		return u.UserID
+	}
+	return 0
 }
 
 // New constructs a podcaster API. `jobs` may be nil — in which case downloads
@@ -435,9 +445,9 @@ func (a *API) subscribe(w http.ResponseWriter, r *http.Request) {
 
 	// Insert feed
 	res, err := a.db.ExecContext(r.Context(),
-		`INSERT OR IGNORE INTO podcast_feeds(url, title, description, image_url, author, link, language, last_fetched_at)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		feedURL, feed.Title, feed.Description, imageURL, authorName, feed.Link, feed.Language, time.Now().Unix())
+		`INSERT OR IGNORE INTO podcast_feeds(url, title, description, image_url, author, link, language, last_fetched_at, user_id)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		feedURL, feed.Title, feed.Description, imageURL, authorName, feed.Link, feed.Language, time.Now().Unix(), getUserID(r))
 	if err != nil {
 		http.Error(w, "db error: "+err.Error(), 500)
 		return
@@ -516,11 +526,17 @@ func (a *API) unsubscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", 400)
 		return
 	}
+	uid := getUserID(r)
 	// Delete episodes first (cascade should handle it, but be explicit)
 	a.db.ExecContext(r.Context(), `DELETE FROM podcast_episodes WHERE feed_id=?`, id)
-	_, err := a.db.ExecContext(r.Context(), `DELETE FROM podcast_feeds WHERE id=?`, id)
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM podcast_feeds WHERE id=? AND (user_id IS NULL OR user_id=?)`, id, uid)
 	if err != nil {
 		http.Error(w, "db error: "+err.Error(), 500)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		http.Error(w, "feed not found or not owned by you", 404)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
@@ -534,8 +550,9 @@ func (a *API) listFeeds(w http.ResponseWriter, r *http.Request) {
 		        f.last_fetched_at, f.auto_download
 		 FROM podcast_feeds f
 		 LEFT JOIN podcast_episodes e ON e.feed_id = f.id
+		 WHERE f.user_id IS NULL OR f.user_id=?
 		 GROUP BY f.id
-		 ORDER BY f.created_at DESC`)
+		 ORDER BY f.created_at DESC`, getUserID(r))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return

@@ -35,17 +35,18 @@ type Track struct {
 	SpotifyID         string  `json:"spotify_id,omitempty"`
 	ExternalURL       string  `json:"external_url,omitempty"`
 	AppleID           string  `json:"apple_id,omitempty"`
+	UserID            int64   `json:"user_id,omitempty"`
 }
 
 // TrackCols matches the actual tracks table schema exactly.
 // Column order must match ScanTrack's Scan argument order.
 // Uses raw column names — NULLs are handled by sql.NullString in ScanTrack.
-const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url, apple_id`
+const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url, apple_id, user_id`
 
 // ExpectedTrackCols is the exact number of columns in TrackCols.
 // Must match the dest argument count in ScanTrack and the columns in
 // TrackColsAliased. Edit all three when adding or removing columns.
-const ExpectedTrackCols = 23
+const ExpectedTrackCols = 24
 
 // TrackColsAliased returns TrackCols with a table prefix for JOIN queries
 // where column names might be ambiguous (e.g., tracks_fts has title, artist, etc.).
@@ -56,7 +57,7 @@ func TrackColsAliased(alias string) string {
 		"duration_sec", "media_kind", "mime",
 		"size_bytes", "cover_path", "added_at", "mtime",
 		"loudness_integrated", "loudness_true_peak", "loudness_range",
-		"spotify_id", "external_url", "apple_id",
+		"spotify_id", "external_url", "apple_id", "user_id",
 	}
 	for i, c := range cols {
 		cols[i] = alias + "." + c
@@ -76,6 +77,7 @@ func ScanTrack(s interface {
 	var sizeBytes, addedAt, mtime sql.NullInt64
 	var coverPath sql.NullString
 	var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
+	var userID sql.NullInt64
 
 	dests := []interface{}{
 		&t.ID,
@@ -85,6 +87,7 @@ func ScanTrack(s interface {
 		&sizeBytes, &coverPath, &addedAt, &mtime,
 		&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
 		&spotifyID, &externalURL, &appleID,
+		&userID,
 	}
 
 	if len(dests) != ExpectedTrackCols {
@@ -161,6 +164,9 @@ func ScanTrack(s interface {
 	}
 	if appleID.Valid {
 		t.AppleID = appleID.String
+	}
+	if userID.Valid {
+		t.UserID = userID.Int64
 	}
 
 	return t, nil

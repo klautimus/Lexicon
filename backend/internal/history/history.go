@@ -8,11 +8,19 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/auth"
 )
 
 type API struct{ db *sql.DB }
 
 func New(db *sql.DB) *API { return &API{db: db} }
+
+func getUserID(r *http.Request) int64 {
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		return u.UserID
+	}
+	return 0
+}
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -71,8 +79,8 @@ func (a *API) recordPlay(w http.ResponseWriter, r *http.Request) {
 		completed = 1
 	}
 	_, err := a.db.ExecContext(r.Context(),
-		`INSERT INTO plays(track_id,started_at,duration_played_sec,completed,source) VALUES(?,?,?,?,?)`,
-		p.TrackID, p.StartedAt, p.DurationPlayedSec, completed, p.Source)
+		`INSERT INTO plays(track_id,started_at,duration_played_sec,completed,source,user_id) VALUES(?,?,?,?,?,?)`,
+		p.TrackID, p.StartedAt, p.DurationPlayedSec, completed, p.Source, nil)
 	if err != nil {
 		log.Printf("[history] recordPlay insert track %d: %v", p.TrackID, err)
 		writeError(w, err.Error(), 500)
@@ -85,7 +93,8 @@ func (a *API) recent(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT p.id, p.track_id, IFNULL(t.title,'(deleted)'), IFNULL(t.artist,''), IFNULL(t.album,''), p.started_at, p.duration_played_sec, p.completed, p.source
 		FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
-		ORDER BY p.started_at DESC LIMIT 50`)
+		WHERE p.user_id IS NULL OR p.user_id = ?
+		ORDER BY p.started_at DESC LIMIT 50`, getUserID(r))
 	if err != nil {
 		log.Printf("[history] recent query: %v", err)
 		writeError(w, err.Error(), 500)

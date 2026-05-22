@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/auth"
 	"github.com/kevin/lexicon/internal/models"
 )
 
@@ -54,6 +55,15 @@ func writeError(w http.ResponseWriter, message string, code int) {
 	}
 }
 
+// getUserID extracts the authenticated user ID from the request context.
+// Returns 0 if no user is authenticated (backward compatibility).
+func getUserID(r *http.Request) int64 {
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		return u.UserID
+	}
+	return 0
+}
+
 func (a *API) Mount(r chi.Router) {
 	r.Get("/api/playlists", a.list)
 	r.Post("/api/playlists", a.create)
@@ -65,13 +75,32 @@ func (a *API) Mount(r chi.Router) {
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at
-		FROM playlists p
-		LEFT JOIN playlist_items i ON i.playlist_id = p.id
-		LEFT JOIN tracks t ON t.id = i.track_id
-		GROUP BY p.id
-		ORDER BY p.created_at DESC`)
+	uid := getUserID(r)
+	var query string
+	var args []interface{}
+	if uid > 0 {
+		// Authenticated: only show this user's playlists (no legacy NULL playlists)
+		query = `
+			SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at
+			FROM playlists p
+			LEFT JOIN playlist_items i ON i.playlist_id = p.id
+			LEFT JOIN tracks t ON t.id = i.track_id
+			WHERE p.user_id = ?
+			GROUP BY p.id
+			ORDER BY p.created_at DESC`
+		args = []interface{}{uid}
+	} else {
+		// Unauthenticated: only show legacy playlists (user_id IS NULL)
+		query = `
+			SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at
+			FROM playlists p
+			LEFT JOIN playlist_items i ON i.playlist_id = p.id
+			LEFT JOIN tracks t ON t.id = i.track_id
+			WHERE p.user_id IS NULL
+			GROUP BY p.id
+			ORDER BY p.created_at DESC`
+	}
+	rows, err := a.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		log.Printf("[playlists] list query: %v", err)
 		writeError(w, err.Error(), 500)
@@ -117,7 +146,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Check for duplicate name before creating
 	var existingID int64
-	if err := a.db.QueryRowContext(r.Context(), `SELECT id FROM playlists WHERE name=?`, req.Name).Scan(&existingID); err != sql.ErrNoRows {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT id FROM playlists WHERE name=? AND (user_id IS NULL OR user_id=?)`, req.Name, getUserID(r)).Scan(&existingID); err != sql.ErrNoRows {
 		if err == nil {
 			writeError(w, "playlist with this name already exists", 409)
 			return
@@ -126,7 +155,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err.Error(), 500)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name) VALUES (?)`, req.Name)
+	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name, user_id) VALUES (?, ?)`, req.Name, getUserID(r))
 	if err != nil {
 		log.Printf("[playlists] create insert: %v", err)
 		writeError(w, err.Error(), 500)
@@ -140,7 +169,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	var p PlaylistWithTracks
 	err := a.db.QueryRowContext(r.Context(), `
-		SELECT id, name, created_at FROM playlists WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.CreatedAt)
+		SELECT id, name, created_at FROM playlists WHERE id=? AND (user_id IS NULL OR user_id=?)`, id, getUserID(r)).Scan(&p.ID, &p.Name, &p.CreatedAt)
 	if err != nil {
 		log.Printf("[playlists] get playlist %d: %v", id, err)
 		writeError(w, "not found", 404)
@@ -166,6 +195,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		var sizeBytes, addedAt, mtime sql.NullInt64
 		var coverPath sql.NullString
 		var loudnessIntegrated, loudnessTruePeak, loudnessRange sql.NullFloat64
+		var userID sql.NullInt64
 		var position int
 		err := rows.Scan(
 			&t.ID,
@@ -175,6 +205,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 			&sizeBytes, &coverPath, &addedAt, &mtime,
 			&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
 			&spotifyID, &externalURL, &appleID,
+			&userID,
 			&position,
 		)
 		if err != nil {
@@ -204,6 +235,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		if spotifyID.Valid { t.SpotifyID = spotifyID.String }
 		if externalURL.Valid { t.ExternalURL = externalURL.String }
 		if appleID.Valid { t.AppleID = appleID.String }
+		if userID.Valid { t.UserID = userID.Int64 }
 		p.Tracks = append(p.Tracks, PlaylistTrack{Track: t, Position: position})
 		p.TotalDuration += int(t.DurationSec)
 	}
@@ -235,7 +267,7 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "name is required", 400)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=? WHERE id=?`, req.Name, id)
+	res, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=? WHERE id=? AND (user_id IS NULL OR user_id=?)`, req.Name, id, getUserID(r))
 	if err != nil {
 		log.Printf("[playlists] update exec playlist %d: %v", id, err)
 		writeError(w, err.Error(), 500)
@@ -256,7 +288,7 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=?`, id)
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=? AND (user_id IS NULL OR user_id=?)`, id, getUserID(r))
 	if err != nil {
 		log.Printf("[playlists] delete exec playlist %d: %v", id, err)
 		writeError(w, err.Error(), 500)

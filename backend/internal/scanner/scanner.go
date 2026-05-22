@@ -162,15 +162,15 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 
 	// Insert/update the track in the DB first (fast path — no blocking ffmpeg call)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tracks(path,title,artist,album_artist,album,track_no,disc_no,year,genre,mime,size_bytes,cover_path,added_at,media_kind,mtime,loudness_integrated,loudness_true_peak,loudness_range)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO tracks(path,title,artist,album_artist,album,track_no,disc_no,year,genre,mime,size_bytes,cover_path,added_at,media_kind,mtime,loudness_integrated,loudness_true_peak,loudness_range,user_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(path) DO UPDATE SET
 			title=excluded.title, artist=excluded.artist, album_artist=excluded.album_artist,
 			album=excluded.album, track_no=excluded.track_no, disc_no=excluded.disc_no,
 			year=excluded.year, genre=excluded.genre, mime=excluded.mime,
 			size_bytes=excluded.size_bytes, cover_path=excluded.cover_path, media_kind=excluded.media_kind, mtime=excluded.mtime,
 			loudness_integrated=excluded.loudness_integrated, loudness_true_peak=excluded.loudness_true_peak, loudness_range=excluded.loudness_range
-	`, path, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime, info.Size(), "", 0, kind, mtime, 0.0, 0.0, 0.0)
+	`, path, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime, info.Size(), "", 0, kind, mtime, 0.0, 0.0, 0.0, nil)
 	if err != nil {
 		return err
 	}

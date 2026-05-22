@@ -257,6 +257,13 @@ func main() {
 		wsHub.Run()
 	}()
 
+	// Auth handler (session-based user authentication)
+	authHandler := auth.NewHandler(database)
+
+	// Session cleanup goroutine — prunes expired sessions every 10 minutes.
+	stopSessionCleanup := auth.StartSessionCleanup(10 * time.Minute)
+	defer stopSessionCleanup()
+
 	// Initial scan in background — uses a cancellable context so shutdown
 	// can abort it, and registers on the WaitGroup so db.Close() waits.
 	wg.Add(1)
@@ -338,15 +345,18 @@ func main() {
 		})
 	})
 
-	// API key auth for write operations (POST/PUT/DELETE) and stream endpoint (GET)
+	// Session-based auth middleware for all /api/ routes.
+	// Skips /api/auth/login (which creates sessions) and /api/health.
+	// Falls through to API key auth if no session, then to unauthenticated
+	// if no API key is configured (desktop app backward compatibility).
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == "POST" || r.Method == "PUT" || r.Method == "DELETE" ||
-				strings.HasPrefix(r.URL.Path, "/api/stream/") {
-				auth.RequireAPIKey(next).ServeHTTP(w, r)
+			if r.URL.Path == "/api/auth/login" || r.URL.Path == "/api/health" ||
+				r.Method == "OPTIONS" {
+				next.ServeHTTP(w, r)
 				return
 			}
-			next.ServeHTTP(w, r)
+			auth.RequireAuth(next).ServeHTTP(w, r)
 		})
 	})
 
@@ -380,6 +390,7 @@ func main() {
 		}
 	})
 
+	authHandler.Mount(r)
 	libAPI.Mount(r)
 	playlistAPI.Mount(r)
 	strm.Mount(r)
@@ -484,21 +495,23 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-	log.Printf("[lexicon] shutting down...")
+	sig := <-stop
+	log.Printf("[lexicon] received %s, shutting down...", sig)
 
-	// Shut down HTTP server first to stop accepting new requests.
-	srv.Shutdown(shutdownCtx)
-	shutdown()
-
-	// Shut down subsystems that have their own goroutines.
-	dlAPI.Shutdown()
+	// Phase 1: Signal subsystems to begin graceful shutdown.
+	// Shutdown() now implements a 30s grace period for in-flight downloads.
+	// These calls block until downloads complete or timeout.
 	podcastAPI.Shutdown()
+	dlAPI.Shutdown()
 	spotifyAPI.Shutdown()
 	appleAPI.Shutdown()
 	wsHub.Shutdown()
 
-	// Cancel all background contexts to abort in-flight work.
+	// Phase 2: Stop accepting new requests and cancel main context.
+	shutdown()
+	srv.Shutdown(shutdownCtx)
+
+	// Phase 3: Cancel background scans.
 	rescanMu.Lock()
 	if rescanCancel != nil {
 		rescanCancel()
@@ -506,12 +519,9 @@ func main() {
 	rescanMu.Unlock()
 	initScanCancel()
 
-	// Wait for all background goroutines to finish, with a timeout.
+	// Phase 4: Wait for tracked goroutines with timeout.
 	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
 		log.Printf("[lexicon] all goroutines stopped")
@@ -519,7 +529,7 @@ func main() {
 		log.Printf("[lexicon] WARNING: shutdown timeout — some goroutines still running")
 	}
 
-	// Now safe to close the database — no in-flight queries.
+	// Phase 5: Safe to close database — all DB writes from subsystems are complete.
 	database.Close()
 	log.Printf("[lexicon] shutdown complete")
 }

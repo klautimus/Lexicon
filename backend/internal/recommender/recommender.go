@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/auth"
 	"github.com/kevin/lexicon/internal/apple"
 	"github.com/kevin/lexicon/internal/spotify"
 	"github.com/kevin/lexicon/internal/websearch"
@@ -40,6 +41,13 @@ type API struct {
 	ws      *websearch.WebSearch
 	spotify *spotify.API
 	apple   *apple.API
+}
+
+func getUserID(r *http.Request) int64 {
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		return u.UserID
+	}
+	return 0
 }
 
 func New(db *sql.DB, cfg DeepSeekConfig, ws *websearch.WebSearch, spotifyAPI *spotify.API, appleAPI *apple.API) *API {
@@ -89,10 +97,11 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	var query string
 	var args []interface{}
 	if filterType != "" {
-		query = `SELECT payload, created_at FROM recommendations WHERE type = ? ORDER BY id DESC LIMIT 1`
-		args = append(args, filterType)
+		query = `SELECT payload, created_at FROM recommendations WHERE type = ? AND (user_id IS NULL OR user_id=?) ORDER BY id DESC LIMIT 1`
+		args = append(args, filterType, getUserID(r))
 	} else {
-		query = `SELECT payload, created_at FROM recommendations WHERE (type IS NULL OR type = '') ORDER BY id DESC LIMIT 1`
+		query = `SELECT payload, created_at FROM recommendations WHERE (type IS NULL OR type = '') AND (user_id IS NULL OR user_id=?) ORDER BY id DESC LIMIT 1`
+		args = append(args, getUserID(r))
 	}
 	err := a.db.QueryRowContext(r.Context(), query, args...).Scan(&payload, &createdAt)
 	if err == sql.ErrNoRows {
@@ -115,7 +124,7 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
-	profile, err := a.buildProfile(ctx)
+profile, err := a.buildProfile(ctx, getUserID(r))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -147,7 +156,7 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, _ := json.Marshal(payload)
-	_, err = a.db.ExecContext(ctx, `INSERT INTO recommendations(payload) VALUES(?)`, string(raw))
+	_, err = a.db.ExecContext(ctx, `INSERT INTO recommendations(payload, user_id) VALUES(?, ?)`, string(raw), getUserID(r))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -174,7 +183,7 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
-	profile, err := a.buildProfile(ctx)
+profile, err := a.buildProfile(ctx, getUserID(r))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -200,7 +209,7 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	profileHash := hashProfile(profile)
+	profileHash := hashProfile(fmt.Sprintf("%d:%s", getUserID(r), profile))
 
 	// Cache lookup: check for a playlist generated from the same profile within the last hour
 	if !force {
@@ -208,8 +217,9 @@ func (a *API) playlist(w http.ResponseWriter, r *http.Request) {
 		err := a.db.QueryRowContext(ctx,
 			`SELECT payload FROM recommendations
 			 WHERE type='playlist' AND prompt_hash=?
+			 AND (user_id IS NULL OR user_id=?)
 			 AND created_at > strftime('%s','now','-1 hour')
-			 ORDER BY id DESC LIMIT 1`, profileHash).Scan(&cachedPayload)
+			 ORDER BY id DESC LIMIT 1`, profileHash, getUserID(r)).Scan(&cachedPayload)
 		if err == nil {
 			var out PlaylistPayload
 			if json.Unmarshal([]byte(cachedPayload), &out) == nil {
@@ -301,8 +311,8 @@ PROFILE:
 	// Store result in recommendations table for future cache hits
 	raw, _ := json.Marshal(out)
 	_, _ = a.db.ExecContext(ctx,
-		`INSERT INTO recommendations(type, prompt_hash, payload) VALUES('playlist', ?, ?)`,
-		profileHash, string(raw))
+		`INSERT INTO recommendations(type, prompt_hash, payload, user_id) VALUES('playlist', ?, ?, ?)`,
+		profileHash, string(raw), getUserID(r))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
@@ -328,7 +338,7 @@ func (a *API) chat(w http.ResponseWriter, r *http.Request) {
 	// 120s timeout: buildProfile + buildSpotifyProfile (5 API calls) + DeepSeek call
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
-	profile, _ := a.buildProfile(ctx)
+profile, err := a.buildProfile(ctx, getUserID(r))
 
 	// Enrich profile with Spotify top data if connected
 	if a.spotify != nil {
@@ -454,7 +464,7 @@ REMEMBER: Always return a JSON object with a "message" field.
 }
 
 // buildProfile renders a compact natural-language summary of recent listening.
-func (a *API) buildProfile(ctx context.Context) (string, error) {
+func (a *API) buildProfile(ctx context.Context, userID int64) (string, error) {
 	var b strings.Builder
 
 	// Top artists last 90d
@@ -462,7 +472,8 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 		SELECT IFNULL(COALESCE(NULLIF(t.album_artist,''),t.artist),''), COUNT(*)
 		FROM plays p JOIN tracks t ON t.id=p.track_id
 		WHERE p.started_at > strftime('%s','now','-90 days')
-		GROUP BY 1 ORDER BY 2 DESC LIMIT 10`)
+		AND (p.user_id IS NULL OR p.user_id = ?)
+		GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, userID)
 	if err == nil {
 		fmt.Fprintln(&b, "Top artists (90d):")
 		for rows.Next() {
@@ -487,7 +498,8 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 	rows, err = a.db.QueryContext(ctx, `
 		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p JOIN tracks t ON t.id=p.track_id
 		WHERE p.started_at > strftime('%s','now','-90 days')
-		GROUP BY 1 HAVING IFNULL(t.genre,'')!='' ORDER BY 2 DESC LIMIT 8`)
+		AND (p.user_id IS NULL OR p.user_id = ?)
+		GROUP BY 1 HAVING IFNULL(t.genre,'')!='' ORDER BY 2 DESC LIMIT 8`, userID)
 	if err == nil {
 		fmt.Fprintln(&b, "Top genres (90d):")
 		for rows.Next() {
@@ -505,7 +517,8 @@ func (a *API) buildProfile(ctx context.Context) (string, error) {
 	// Recent
 	rows, err = a.db.QueryContext(ctx, `
 		SELECT t.title, IFNULL(t.artist,''), t.media_kind FROM plays p JOIN tracks t ON t.id=p.track_id
-		ORDER BY p.started_at DESC LIMIT 15`)
+		WHERE (p.user_id IS NULL OR p.user_id = ?)
+		ORDER BY p.started_at DESC LIMIT 15`, userID)
 	if err == nil {
 		fmt.Fprintln(&b, "Recently played:")
 		for rows.Next() {
@@ -698,7 +711,7 @@ func (a *API) buildAppleProfile(ctx context.Context) string {
 	if a.apple == nil {
 		return ""
 	}
-	devTok, mut, err := a.apple.CurrentTokens(ctx)
+	devTok, mut, err := a.apple.CurrentTokens(ctx, 1)
 	if err != nil || mut == "" {
 		// Not configured or not connected — silent no-op.
 		return ""

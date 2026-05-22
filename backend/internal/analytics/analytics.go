@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/auth"
 )
 
 // validSQLiteTimeModifiers is a whitelist of safe SQLite strftime modifiers
@@ -58,6 +60,13 @@ func normalizeTimezone(tz string) string {
 
 type API struct{ db *sql.DB; timezone string }
 
+func getUserID(r *http.Request) int64 {
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		return u.UserID
+	}
+	return 0
+}
+
 func New(db *sql.DB, timezone string) *API { return &API{db: db, timezone: timezone} }
 
 func (a *API) Mount(r chi.Router) {
@@ -89,29 +98,29 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		CompletedPct int `json:"completed_pct"`
 	}
 	var o O
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plays`).Scan(&o.TotalPlays); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM plays WHERE user_id IS NULL OR user_id = ?`, getUserID(r)).Scan(&o.TotalPlays); err != nil {
 		log.Printf("[analytics] overview total_plays: %v", err)
 		writeError(w, "failed to load analytics", 500)
 		return
 	}
-	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT track_id) FROM plays`).Scan(&o.UniqueTracks); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT COUNT(DISTINCT track_id) FROM plays WHERE user_id IS NULL OR user_id = ?`, getUserID(r)).Scan(&o.UniqueTracks); err != nil {
 		log.Printf("[analytics] overview unique_tracks: %v", err)
 		writeError(w, "failed to load analytics", 500)
 		return
 	}
-	if err := a.db.QueryRowContext(r.Context(), `SELECT IFNULL(SUM(duration_played_sec),0) FROM plays`).Scan(&o.ListenSec); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT IFNULL(SUM(duration_played_sec),0) FROM plays WHERE user_id IS NULL OR user_id = ?`, getUserID(r)).Scan(&o.ListenSec); err != nil {
 		log.Printf("[analytics] overview listen_sec: %v", err)
 		writeError(w, "failed to load analytics", 500)
 		return
 	}
 	if o.TotalPlays > 0 {
 		var c int
-		if err := a.db.QueryRowContext(r.Context(), `SELECT SUM(completed) FROM plays`).Scan(&c); err != nil {
+		if err := a.db.QueryRowContext(r.Context(), `SELECT SUM(completed) FROM plays WHERE user_id IS NULL OR user_id = ?`, getUserID(r)).Scan(&c); err != nil {
 			log.Printf("[analytics] overview completed: %v", err)
 			writeError(w, "failed to load analytics", 500)
 			return
 		}
-		o.CompletedPct = c * 100 / o.TotalPlays
+		o.CompletedPct = int(math.Round(float64(c) * 100.0 / float64(o.TotalPlays)))
 	}
 	writeJSON(w, o)
 }
@@ -119,8 +128,8 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT IFNULL(COALESCE(NULLIF(t.album_artist,''),t.artist),'') AS artist, COUNT(*), IFNULL(SUM(p.duration_played_sec),0)
-		FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
-		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`)
+		FROM plays p LEFT JOIN tracks t ON t.id=p.track_id WHERE p.user_id IS NULL OR p.user_id=?
+		GROUP BY artist HAVING artist!='' ORDER BY COUNT(*) DESC LIMIT 20`, getUserID(r))
 	if err != nil {
 		log.Printf("[analytics] topArtists query: %v", err)
 		writeError(w, "failed to load data", 500)
@@ -153,7 +162,8 @@ func (a *API) topArtists(w http.ResponseWriter, r *http.Request) {
 func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT t.id, IFNULL(t.title,'(deleted)'), IFNULL(t.artist,''), COUNT(*) FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
-		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`)
+		WHERE p.user_id IS NULL OR p.user_id=?
+		GROUP BY t.id ORDER BY COUNT(*) DESC LIMIT 20`, getUserID(r))
 	if err != nil {
 		log.Printf("[analytics] topTracks query: %v", err)
 		writeError(w, "failed to load data", 500)
@@ -187,7 +197,8 @@ func (a *API) topTracks(w http.ResponseWriter, r *http.Request) {
 func (a *API) topGenres(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT IFNULL(t.genre,''), COUNT(*) FROM plays p LEFT JOIN tracks t ON t.id=p.track_id
-		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`)
+		WHERE p.user_id IS NULL OR p.user_id=?
+		GROUP BY t.genre HAVING t.genre!='' ORDER BY COUNT(*) DESC LIMIT 15`, getUserID(r))
 	if err != nil {
 		log.Printf("[analytics] topGenres query: %v", err)
 		writeError(w, "failed to load data", 500)
@@ -220,8 +231,8 @@ func (a *API) heatmap(w http.ResponseWriter, r *http.Request) {
 	tzMod := normalizeTimezone(a.timezone)
 	q := fmt.Sprintf(`SELECT CAST(strftime('%%w', started_at, 'unixepoch', '%s') AS INTEGER) AS dow,
 	       CAST(strftime('%%H', started_at, 'unixepoch', '%s') AS INTEGER) AS hour,
-	       COUNT(*) FROM plays GROUP BY dow, hour`, tzMod, tzMod)
-	rows, err := a.db.QueryContext(r.Context(), q)
+	       COUNT(*) FROM plays WHERE user_id IS NULL OR user_id = ? GROUP BY dow, hour`, tzMod, tzMod)
+	rows, err := a.db.QueryContext(r.Context(), q, getUserID(r))
 	if err != nil {
 		log.Printf("[analytics] heatmap query: %v", err)
 		writeError(w, "failed to load data", 500)
