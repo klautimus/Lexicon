@@ -137,10 +137,12 @@ type Job struct {
 	Tool       string   `json:"tool,omitempty"`        // "spotiflac", "spotdl", "ytdlp", "poddl", "http", etc.
 	UsedFallback bool   `json:"used_fallback,omitempty"`
 	IsSearch   bool     `json:"is_search,omitempty"`   // true when created via /download/search (no Spotify URL)
-	TrackID    int64    `json:"track_id,omitempty"`    // set when search resolves to existing library track
-	Kind       string   `json:"kind,omitempty"`        // "music" (default) or "podcast"; differentiates the source on the Downloads page
-	UserID     int64    `json:"user_id,omitempty"`     // authenticated user who created this job
-	Log        []string `json:"log,omitempty"`
+	TrackID       int64    `json:"track_id,omitempty"`       // set when search resolves to existing library track
+	Kind          string   `json:"kind,omitempty"`           // "music" (default) or "podcast"; differentiates the source on the Downloads page
+	UserID        int64    `json:"user_id,omitempty"`        // authenticated user who created this job
+	Log           []string `json:"log,omitempty"`
+	Progress      float64  `json:"progress,omitempty"`       // 0-100 download percentage
+	ProgressLabel string   `json:"progress_label,omitempty"` // e.g. "1/5 tracks", "45.2%"
 
 	cmd *exec.Cmd `json:"-"`
 }
@@ -300,6 +302,7 @@ func (a *API) Mount(r chi.Router) {
 	r.Get("/api/download/jobs", a.listJobs)
 	r.Get("/api/download/jobs/{id}", a.getJob)
 	r.Post("/api/download/jobs/{id}/cancel", a.cancelJob)
+	r.Get("/api/download/progress", a.progress)
 	// Track upgrade endpoints (re-download with new pipeline)
 	r.Post("/api/library/upgrade", a.upgradeTrack)
 	r.Post("/api/library/upgrade-all", a.upgradeAll)
@@ -633,6 +636,69 @@ func (a *API) cancelJob(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db.Exec(`UPDATE download_jobs SET status='cancelled', finished_at=? WHERE id=?`, finishedAt, id)
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// progress returns all active (queued/running) jobs with their progress
+// fields so the frontend DownloadProgressBar can display live updates.
+// Returns [] (empty array) when no active jobs exist.
+func (a *API) progress(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	uid := getUserID(r)
+	out := make([]*Job, 0)
+	for _, id := range a.order {
+		j := a.jobs[id]
+		if j == nil {
+			continue
+		}
+		// Only return queued or running jobs
+		if j.Status != StatusQueued && j.Status != StatusRunning {
+			continue
+		}
+		// Filter by user
+		if uid > 0 && j.UserID > 0 && j.UserID != uid {
+			continue
+		}
+		// Compute progress from log lines matching "[N/M] Track - Artist"
+		j.Progress = 0
+		j.ProgressLabel = ""
+		if j.Status == StatusQueued {
+			j.ProgressLabel = "queued"
+		}
+		for _, line := range j.Log {
+			if m := spotiflacProgressRE.FindStringSubmatch(line); m != nil {
+				current, _ := strconv.Atoi(m[1])
+				total, _ := strconv.Atoi(m[2])
+				if total > 0 {
+					j.Progress = float64(current) / float64(total) * 100
+					j.ProgressLabel = fmt.Sprintf("%d/%d tracks", current, total)
+				}
+			}
+		}
+		// For yt-dlp jobs, derive progress from download percentage in log
+		if j.Progress == 0 && j.Tool != "" && j.Tool != "spotiflac" {
+			for _, line := range j.Log {
+				// yt-dlp prints lines like: [download]  45.2% of ~3.50MiB
+				if idx := strings.Index(line, "[download]"); idx >= 0 {
+					rest := line[idx+len("[download]"):]
+					rest = strings.TrimSpace(rest)
+					if pctIdx := strings.Index(rest, "%"); pctIdx > 0 {
+						pctStr := strings.TrimSpace(rest[:pctIdx])
+						if pct, err := strconv.ParseFloat(pctStr, 64); err == nil {
+							j.Progress = pct
+							j.ProgressLabel = fmt.Sprintf("%.1f%%", pct)
+							break
+						}
+					}
+				}
+			}
+		}
+		cp := *j
+		cp.Log = nil
+		cp.cmd = nil
+		out = append(out, &cp)
+	}
+	writeJSON(w, out)
 }
 
 // ----- External job API -----
