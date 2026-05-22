@@ -174,10 +174,10 @@ export default function HomePage() {
           <h2 className="text-lg font-semibold">Recently Played</h2>
           <button
             onClick={() => showHelp("home.recent")}
-            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            className="p-2 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50 min-w-[44px] min-h-[44px] flex items-center justify-center"
             aria-label="Help: Recently Played"
           >
-            <HelpCircle size={14} />
+            <HelpCircle size={16} />
           </button>
         </div>
         {recent.length === 0 && !recentError ? (
