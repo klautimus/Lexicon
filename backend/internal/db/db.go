@@ -90,6 +90,8 @@ CREATE INDEX IF NOT EXISTS idx_plays_started ON plays(started_at);
 CREATE TABLE IF NOT EXISTS playlists (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	name TEXT NOT NULL,
+	description TEXT,
+	cover_art_path TEXT,
 	created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
 	user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
 );
@@ -396,8 +398,24 @@ if !columnExists(db, "tracks", "user_id") {
 			return err
 		}
 	}
+	// Playlist cover art and description fields (v3.5.2)
+	if !columnExists(db, "playlists", "description") {
+		if _, err := db.Exec(`ALTER TABLE playlists ADD COLUMN description TEXT`); err != nil {
+			return err
+		}
+	}
+	if !columnExists(db, "playlists", "cover_art_path") {
+		if _, err := db.Exec(`ALTER TABLE playlists ADD COLUMN cover_art_path TEXT`); err != nil {
+			return err
+		}
+	}
 	if !columnExists(db, "podcast_feeds", "user_id") {
 		if _, err := db.Exec(`ALTER TABLE podcast_feeds ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`); err != nil {
+			return err
+		}
+	}
+	if !columnExists(db, "podcast_feeds", "auto_download") {
+		if _, err := db.Exec(`ALTER TABLE podcast_feeds ADD COLUMN auto_download INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}

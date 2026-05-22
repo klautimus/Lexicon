@@ -4,6 +4,7 @@ import { api, Track } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
 import { useHelp } from "../contexts/HelpContext";
 import { useDownloads } from "../contexts/DownloadContext";
+import { usePlayer } from "../player/PlayerContext";
 import TrackList from "../components/TrackList";
 
 const PAGE_SIZE = 200;
@@ -34,6 +35,7 @@ export default function SearchPage() {
   const toast = useToast();
   const { showHelp } = useHelp();
   const { trackDownload } = useDownloads();
+  const player = usePlayer();
 
   // URL-synced query param
   const [q, setQ] = useState(() => {
@@ -360,7 +362,7 @@ export default function SearchPage() {
           <p className="text-sm text-muted mb-2">
             {resultCount} result{resultCount !== 1 ? "s" : ""} for "{q.trim()}"
           </p>
-          <TrackList tracks={displayedResults} onDelete={handleDelete} />
+          <TrackList tracks={displayedResults} onDelete={handleDelete} player={player} />
           {hasMore && (
             <div className="mt-4 text-center">
               <button
