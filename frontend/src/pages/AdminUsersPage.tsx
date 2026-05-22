@@ -1,9 +1,10 @@
-import { useState, useEffect, type FormEvent } from "react";
+import { useState, useEffect, useRef, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { User as UserIcon, Plus, Trash2, Loader2, Shield, Eye, EyeOff } from "lucide-react";
+import { User as UserIcon, Plus, Trash2, Loader2, Shield, Eye, EyeOff, HelpCircle, X } from "lucide-react";
 import { api, type User } from "../lib/api";
 import { useUser } from "../contexts/UserContext";
 import { useToast } from "../contexts/ToastContext";
+import { useHelp } from "../contexts/HelpContext";
 
 export default function AdminUsersPage() {
   const { user: currentUser, isAdmin } = useUser();
