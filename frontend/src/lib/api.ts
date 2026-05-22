@@ -110,13 +110,13 @@ export const api = {
       body: JSON.stringify({ message }),
       signal,
     }),
-  generatePlaylist: (force?: boolean, count?: number) => {
+  generatePlaylist: (force?: boolean, count?: number, signal?: AbortSignal) => {
     let url = '/recommendations/playlist';
     const params = new URLSearchParams();
     if (force) params.set('force', 'true');
     if (count) params.set('count', count.toString());
     if (params.toString()) url += '?' + params.toString();
-    return j<PlaylistPayload>(url, { method: 'POST' });
+    return j<PlaylistPayload>(url, { method: 'POST', signal });
   },
   spotifyStatus: () => j<SpotifyStatus>("/spotify/status"),
   spotifyAuthURL: () => "/api/spotify/auth-url",

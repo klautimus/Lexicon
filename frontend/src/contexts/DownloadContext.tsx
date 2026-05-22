@@ -30,6 +30,7 @@ interface DownloadContextValue {
   downloadItem: (title: string, artist: string) => Promise<void>;
   trackDownload: (job: DownloadJob, name: string) => void;
   generateAiPlaylist: (force?: boolean, count?: number) => Promise<void>;
+  cancelGeneration: () => void;
   createAiPlaylist: () => Promise<void>;
   clearPlaylistPreview: () => void;
   adoptPlaylistPreview: (playlist: PlaylistPayload) => void;
@@ -40,6 +41,7 @@ const DownloadContext = createContext<DownloadContextValue | null>(null);
 export function DownloadProvider({ children }: { children: ReactNode }) {
   const toast = useToast();
   const pollRef = useRef<Record<string, number>>({});
+  const genAbortRef = useRef<AbortController | null>(null);
 
   // Download tracking
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());

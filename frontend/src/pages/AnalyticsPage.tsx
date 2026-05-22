@@ -295,7 +295,7 @@ export default function AnalyticsPage() {
               ) : (
                 <ResponsiveContainer width="100%" height={260}>
                   <PieChart>
-                    <Pie data={genres} dataKey="plays" nameKey="genre" outerRadius={100} label={(_, i) => i < 5 ? undefined : false}>
+                    <Pie data={genres} dataKey="plays" nameKey="genre" outerRadius={100} label={false}>
                       {genres.map((_, i) => (
                         <Cell key={i} fill={COLORS[i % COLORS.length]} />
                       ))}
