@@ -10,6 +10,7 @@ export default function AdminUsersPage() {
   const { user: currentUser, isAdmin } = useUser();
   const navigate = useNavigate();
   const toast = useToast();
+  const { showHelp } = useHelp();
 
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
@@ -24,31 +25,36 @@ export default function AdminUsersPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
 
-  // Delete confirmation
+  // Delete confirmation modal
+  const [deleteConfirm, setDeleteConfirm] = useState<{ userId: number; username: string } | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  // Redirect non-admins
+  // Redirect non-admins — use useEffect for consistent behavior
   useEffect(() => {
     if (!isAdmin) {
       navigate("/settings", { replace: true });
     }
   }, [isAdmin, navigate]);
 
-  // Load users
+  // Load users — only if admin (B1 fix: guard with admin check)
   useEffect(() => {
+    if (!isAdmin) return;
     let cancelled = false;
     api.users()
       .then((data) => {
         if (!cancelled) { setUsers(data); setError(""); }
       })
       .catch((err) => {
-        if (!cancelled) setError(err?.message || "Failed to load users");
+        if (!cancelled) {
+          setError(err?.message || "Failed to load users");
+          toast.error(err?.message || "Failed to load users");
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [isAdmin]);
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault();
