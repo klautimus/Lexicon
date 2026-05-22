@@ -389,7 +389,16 @@ func (a *API) removeTrack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "position must be >= 0", 400)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlist_items WHERE playlist_id=? AND position=?`, id, position)
+	// C2: Make position recompaction transactional
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("[playlists] removeTrack begin tx playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(r.Context(), `DELETE FROM playlist_items WHERE playlist_id=? AND position=?`, id, position)
 	if err != nil {
 		log.Printf("[playlists] removeTrack exec playlist %d position %d: %v", id, position, err)
 		writeError(w, err.Error(), 500)
@@ -405,11 +414,18 @@ func (a *API) removeTrack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "track not found", 404)
 		return
 	}
-	// Recompact positions: decrement all positions after the removed one
-	if _, err := a.db.ExecContext(r.Context(),
+	// Recompact positions within the same transaction
+	if _, err := tx.ExecContext(r.Context(),
 		`UPDATE playlist_items SET position = position - 1 WHERE playlist_id=? AND position > ?`,
 		id, position); err != nil {
 		log.Printf("[playlists] removeTrack recompact playlist %d position %d: %v", id, position, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[playlists] removeTrack commit playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
