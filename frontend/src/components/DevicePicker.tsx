@@ -10,11 +10,11 @@ interface Device {
   active: boolean;
 }
 
-export default function DevicePicker({ currentTrack }: { currentTrack?: any }) {
+export default function DevicePicker({ currentTrack, queue, position }: { currentTrack?: any; queue?: any[]; position?: number }) {
   const [open, setOpen] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [spotifyDevices, setSpotifyDevices] = useState<SpotifyDevice[]>([]);
-  const [activeDevice, setActiveDevice] = useState<string>("host");
+  const [activeDevice, setActiveDevice] = useState<string>("self");
   const ref = useRef<HTMLDivElement>(null);
   const ws = getPlayerWebSocket();
 
@@ -66,10 +66,11 @@ export default function DevicePicker({ currentTrack }: { currentTrack?: any }) {
   const handleTransfer = async (device: Device) => {
     if (device.type === "spotify") {
       await transferSpotifyPlayback(device.id, true);
-    } else if (device.id === "host") {
-      // Switch to local playback — reload page to take over as player
-      sessionStorage.setItem("playerActive", "1");
-      window.location.reload();
+    } else if (device.id === "self") {
+      // "This Device" — already here, no action needed
+    } else if (device.type === "player") {
+      // Transfer to host computer via WebSocket with queue continuity
+      ws.transfer(device.id, queue, currentTrack, position);
     } else {
       ws.transfer(device.id);
     }
@@ -124,24 +125,9 @@ export default function DevicePicker({ currentTrack }: { currentTrack?: any }) {
               {activeDevice === "self" && <Check size={14} className="text-accent" />}
             </button>
 
-            {/* Host computer */}
-            <button
-              onClick={() => handleTransfer({ id: "host", name: "Host Computer", type: "player", active: activeDevice === "host" })}
-              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-panel2 transition-colors text-left"
-            >
-              <Monitor size={14} className={activeDevice === "host" ? "text-accent" : "text-muted"} />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">Host Computer</p>
-                <p className="text-xs text-muted">
-                  {currentTrack ? `Playing: ${currentTrack.title}` : "Control host playback"}
-                </p>
-              </div>
-              {activeDevice === "host" && <Check size={14} className="text-accent" />}
-            </button>
-
             {/* WebSocket-connected devices */}
             {devices
-              .filter((d) => d.id !== "host" && d.type !== "spotify")
+              .filter((d) => d.type !== "spotify")
               .map((device) => (
                 <button
                   key={device.id}

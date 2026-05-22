@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   Play,
   Trash2,
@@ -25,6 +25,36 @@ function formatDuration(sec: number | null | undefined) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** Parse a user-friendly error message from the API error */
+function parseApiError(e: unknown): string {
+  if (e instanceof Error) {
+    const msg = e.message;
+    // Match "404 {"error":"not found"}" pattern
+    const notFoundMatch = msg.match(/^404\s*\{/);
+    if (notFoundMatch) {
+      return "Playlist not found. It may have been deleted.";
+    }
+    // Match "409 {"error":"playlist with this name already exists"}" pattern
+    const conflictMatch = msg.match(/^409\s*\{/);
+    if (conflictMatch) {
+      try {
+        const jsonStr = msg.slice(msg.indexOf("{"));
+        const parsed = JSON.parse(jsonStr);
+        return parsed.error || "A playlist with this name already exists.";
+      } catch {
+        return "A playlist with this name already exists.";
+      }
+    }
+    // Match other HTTP error codes
+    const httpMatch = msg.match(/^(\d+)\s/);
+    if (httpMatch) {
+      return `Server error (${httpMatch[1]}): ${msg}`;
+    }
+    return msg;
+  }
+  return "An unexpected error occurred.";
+}
+
 export default function PlaylistPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -36,17 +66,34 @@ export default function PlaylistPage() {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // B7: Validate id param is a valid number
+  const playlistId = id && /^\d+$/.test(id) ? Number(id) : null;
 
   async function load() {
-    if (!id) return;
+    if (!playlistId) {
+      setNotFound(true);
+      setLoading(false);
+      return;
+    }
     try {
-      const data = await api.playlist(Number(id));
+      const data = await api.playlist(playlistId);
       setPlaylist(data);
       setEditName(data.name);
       setError(null);
+      setNotFound(false);
     } catch (e) {
       console.error("[PlaylistPage] failed to load playlist", id, e);
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = parseApiError(e);
+      if (msg.includes("not found")) {
+        setNotFound(true);
+        setError(null);
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -57,40 +104,97 @@ export default function PlaylistPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  async function remove(pos: number) {
-    if (!id) return;
-    try {
-      await api.removeFromPlaylist(Number(id), pos);
-      load();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to remove track");
+  const remove = useCallback(async (pos: number) => {
+    if (!playlistId) return;
+    // B6/P1: Optimistic UI update
+    const prevPlaylist = playlist;
+    if (playlist) {
+      const newTracks = playlist.tracks.filter((_, i) => i !== pos);
+      setPlaylist({ ...playlist, tracks: newTracks, track_count: newTracks.length });
     }
-  }
+    try {
+      await api.removeFromPlaylist(playlistId, pos);
+      toast.success("Track removed from playlist");
+      // Re-fetch to ensure consistency
+      const data = await api.playlist(playlistId);
+      setPlaylist(data);
+    } catch (e) {
+      // Rollback on error
+      if (prevPlaylist) setPlaylist(prevPlaylist);
+      toast.error(parseApiError(e));
+    }
+  }, [playlistId, playlist, toast]);
 
   async function saveName() {
-    if (!id || !editName.trim()) return;
+    if (!playlistId || !editName.trim()) return;
+    setSaving(true);
     try {
-      await api.updatePlaylist(Number(id), editName.trim());
+      await api.updatePlaylist(playlistId, editName.trim());
       setEditing(false);
-      load();
+      if (playlist) {
+        setPlaylist({ ...playlist, name: editName.trim() });
+      }
+      toast.success("Playlist renamed");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to save playlist name");
+      toast.error(parseApiError(e));
+    } finally {
+      setSaving(false);
     }
   }
 
   async function deletePlaylist() {
-    if (!id) return;
-    if (!confirm("Delete this playlist? This cannot be undone.")) return;
+    if (!playlistId) return;
+    setDeleting(true);
     try {
-      await api.deletePlaylist(Number(id));
+      await api.deletePlaylist(playlistId);
+      toast.success("Playlist deleted");
       navigate("/playlists");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to delete playlist");
+      toast.error(parseApiError(e));
+      setDeleting(false);
+    }
+  }
+
+  // B8: Keyboard handler for inline edit
+  function handleEditKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveName();
+    } else if (e.key === "Escape") {
+      setEditing(false);
+      if (playlist) setEditName(playlist.name);
     }
   }
 
   if (loading) {
     return <p className="text-muted">Loading…</p>;
+  }
+
+  // B1: Friendly 404 state
+  if (notFound || (!playlist && !error)) {
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={() => navigate("/playlists")}
+          className="flex items-center gap-1 text-sm text-muted hover:text-text"
+        >
+          <ArrowLeft size={14} /> Back to playlists
+        </button>
+        <div className="text-center py-12 space-y-3">
+          <Music size={40} className="mx-auto text-muted" />
+          <p className="text-lg font-medium">Playlist not found</p>
+          <p className="text-sm text-muted">
+            This playlist may have been deleted or the link is incorrect.
+          </p>
+          <button
+            onClick={() => navigate("/playlists")}
+            className="text-sm text-accent hover:underline"
+          >
+            Go to all playlists
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (!playlist) {
@@ -102,10 +206,18 @@ export default function PlaylistPage() {
         >
           <ArrowLeft size={14} /> Back to playlists
         </button>
-        <p className="text-muted">Playlist not found.</p>
+        <p className="text-muted">Unable to load playlist.</p>
         {error && (
-          <p className="text-xs text-red-400 mt-1">Error: {error}</p>
+          <p className="text-sm text-red-400 bg-red-400/10 border border-red-400/30 rounded px-3 py-2">
+            {error}
+          </p>
         )}
+        <button
+          onClick={() => navigate("/playlists")}
+          className="text-sm text-accent hover:underline"
+        >
+          Go to all playlists
+        </button>
       </div>
     );
   }
@@ -127,12 +239,17 @@ export default function PlaylistPage() {
                 type="text"
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
+                onKeyDown={handleEditKeyDown}
                 className="bg-panel2 border border-panel2 rounded px-3 py-1.5 text-lg font-semibold focus:outline-none focus:border-accent"
                 autoFocus
+                aria-label="Playlist name"
+                disabled={saving}
               />
               <button
                 onClick={saveName}
-                className="p-1.5 text-green-400 hover:bg-panel2 rounded"
+                disabled={saving || !editName.trim()}
+                className="p-1.5 text-green-400 hover:bg-panel2 rounded disabled:opacity-50"
+                aria-label="Save playlist name"
               >
                 <Check size={18} />
               </button>
@@ -141,7 +258,9 @@ export default function PlaylistPage() {
                   setEditing(false);
                   setEditName(playlist.name);
                 }}
-                className="p-1.5 text-muted hover:bg-panel2 rounded"
+                disabled={saving}
+                className="p-1.5 text-muted hover:bg-panel2 rounded disabled:opacity-50"
+                aria-label="Cancel editing"
               >
                 <X size={18} />
               </button>
@@ -152,6 +271,7 @@ export default function PlaylistPage() {
               <button
                 onClick={() => setEditing(true)}
                 className="p-1 text-muted hover:text-text"
+                aria-label="Rename playlist"
               >
                 <Edit2 size={14} />
               </button>
@@ -175,6 +295,7 @@ export default function PlaylistPage() {
             <button
               onClick={() => player.play(playlist.tracks, 0)}
               className="px-4 py-2 bg-accent hover:opacity-90 text-black font-medium rounded flex items-center gap-2"
+              aria-label={`Play all tracks in ${playlist.name}`}
             >
               <Play size={16} />
               Play All
@@ -182,7 +303,9 @@ export default function PlaylistPage() {
           )}
           <button
             onClick={deletePlaylist}
-            className="p-2 text-red-400 hover:bg-red-400/10 rounded"
+            disabled={deleting}
+            className="p-2 text-red-400 hover:bg-red-400/10 rounded opacity-100 md:opacity-0 md:group-hover:opacity-100 transition disabled:opacity-50"
+            aria-label="Delete playlist"
             title="Delete playlist"
           >
             <Trash2 size={16} />
@@ -202,11 +325,14 @@ export default function PlaylistPage() {
           <Music size={40} className="mx-auto text-muted" />
           <p className="text-muted">No tracks yet.</p>
           <p className="text-xs text-muted">
-            Browse your library and add tracks to this playlist.
+            <Link to="/library" className="text-accent hover:underline">
+              Browse your library
+            </Link>{" "}
+            and add tracks to this playlist.
           </p>
         </div>
       ) : (
-        <PlaylistTrackList tracks={playlist.tracks} onRemove={(pos) => remove(pos)} />
+        <PlaylistTrackList tracks={playlist.tracks} onRemove={(pos) => remove(pos)} player={player} />
       )}
     </div>
   );
@@ -215,9 +341,11 @@ export default function PlaylistPage() {
 function PlaylistTrackList({
   tracks,
   onRemove,
+  player,
 }: {
   tracks: Track[];
   onRemove: (index: number) => void;
+  player: ReturnType<typeof usePlayer>;
 }) {
   const isMobile = useIsMobile();
   if (isMobile) {
@@ -230,13 +358,14 @@ function PlaylistTrackList({
             index={i}
             tracks={tracks}
             onRemove={() => onRemove(t.position ?? i)}
+            player={player}
           />
         ))}
       </div>
     );
   }
   return (
-    <div className="rounded-lg overflow-hidden border border-panel2">
+    <div className="rounded-lg overflow-hidden border border-panel2 group">
       <table className="w-full text-sm">
         <thead className="bg-panel2/60 text-muted">
           <tr>
@@ -256,6 +385,7 @@ function PlaylistTrackList({
               index={i}
               tracks={tracks}
               onRemove={() => onRemove(t.position ?? i)}
+              player={player}
             />
           ))}
         </tbody>
@@ -269,28 +399,35 @@ function DesktopPlaylistTrackRow({
   index,
   tracks,
   onRemove,
+  player,
 }: {
   track: Track;
   index: number;
   tracks: Track[];
   onRemove: () => void;
+  player: ReturnType<typeof usePlayer>;
 }) {
-  const player = usePlayer();
+  const isCurrentTrack = player.current?.id === track.id;
   return (
     <tr
       onDoubleClick={() => player.play(tracks, index)}
-      className="border-t border-panel2 hover:bg-panel2/40 cursor-pointer group"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") player.play(tracks, index);
+      }}
+      className={`border-t border-panel2 hover:bg-panel2/40 cursor-pointer group ${isCurrentTrack ? "bg-accent/10" : ""}`}
     >
       <td className="px-4 py-2 text-muted">
         <button
           onClick={() => player.play(tracks, index)}
           className="opacity-0 group-hover:opacity-100 hover:text-accent"
+          aria-label={`Play ${track.title}`}
         >
           <Play size={14} />
         </button>
         <span className="group-hover:hidden">{index + 1}</span>
       </td>
-      <td className="px-4 py-2 truncate">{track.title}</td>
+      <td className={`px-4 py-2 truncate ${isCurrentTrack ? "text-accent font-medium" : ""}`}>{track.title}</td>
       <td className="px-4 py-2 text-muted truncate">{track.artist}</td>
       <td className="px-4 py-2 text-muted truncate hidden md:table-cell">{track.album}</td>
       <td className="px-4 py-2 text-muted text-xs">
@@ -303,7 +440,7 @@ function DesktopPlaylistTrackRow({
             onRemove();
           }}
           className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300"
-          title="Remove from playlist"
+          aria-label={`Remove ${track.title} from playlist`}
         >
           <X size={14} />
         </button>
@@ -317,21 +454,23 @@ function MobilePlaylistTrackCard({
   index,
   tracks,
   onRemove,
+  player,
 }: {
   track: Track;
   index: number;
   tracks: Track[];
   onRemove: () => void;
+  player: ReturnType<typeof usePlayer>;
 }) {
-  const player = usePlayer();
+  const isCurrentTrack = player.current?.id === track.id;
   return (
     <div
-      className="bg-panel border border-panel2 rounded-lg p-3 flex items-center gap-3 active:bg-panel2/50 transition-colors"
+      className={`bg-panel border border-panel2 rounded-lg p-3 flex items-center gap-3 active:bg-panel2/50 transition-colors ${isCurrentTrack ? "border-accent/50 bg-accent/5" : ""}`}
       onClick={() => player.play(tracks, index)}
     >
-      <span className="text-xs text-muted w-5 flex-shrink-0">{index + 1}</span>
+      <span className={`text-xs w-5 flex-shrink-0 ${isCurrentTrack ? "text-accent" : "text-muted"}`}>{index + 1}</span>
       <div className="flex-1 min-w-0">
-        <div className="truncate text-sm font-medium">{track.title}</div>
+        <div className={`truncate text-sm font-medium ${isCurrentTrack ? "text-accent" : ""}`}>{track.title}</div>
         <div className="truncate text-xs text-muted">
           {track.artist} {track.album && `— ${track.album}`}
         </div>
@@ -345,7 +484,7 @@ function MobilePlaylistTrackCard({
           onRemove();
         }}
         className="w-9 h-9 flex items-center justify-center text-red-400 flex-shrink-0"
-        title="Remove from playlist"
+        aria-label={`Remove ${track.title} from playlist`}
       >
         <X size={18} />
       </button>

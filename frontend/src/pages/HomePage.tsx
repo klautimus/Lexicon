@@ -16,8 +16,8 @@ export default function HomePage() {
   const [showNetworkHelp, setShowNetworkHelp] = useState(false);
 
   useEffect(() => {
-    api.stats().then(setStats).catch(() => {});
-    api.recent().then(setRecent).catch(() => {});
+    api.stats().then(setStats).catch(() => setStatsError(true));
+    api.recent().then(setRecent).catch(() => setRecentError(true));
     const host = window.location.hostname;
     if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
       setLocalUrl(window.location.origin);
@@ -88,6 +88,7 @@ export default function HomePage() {
             <button
               onClick={() => setShowQr(false)}
               className="flex-shrink-0 p-1 text-muted hover:text-text"
+              aria-label="Dismiss connection banner"
               title="Dismiss"
             >
               <X size={16} />
@@ -122,7 +123,7 @@ export default function HomePage() {
                   ✓ You're connecting directly to the server's LAN IP.
                 </p>
               )}
-              {window.location.hostname !== networkInfo.local_ip && !window.location.hostname.startsWith("192.") && !window.location.hostname.startsWith("10.") && !window.location.hostname.startsWith("172.") && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1" && (
+              {window.location.hostname !== networkInfo.local_ip && !window.location.hostname.startsWith("192.") && !window.location.hostname.startsWith("10.") && !isRfc1918(window.location.hostname) && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1" && (
                 <div className="text-yellow-400 space-y-1">
                   <p>⚠ Your IP ({window.location.hostname}) doesn't look like a local network address.</p>
                   <p className="text-muted">Make sure your device is connected to the same WiFi network as the server ({networkInfo.local_ip}).</p>
@@ -148,10 +149,10 @@ export default function HomePage() {
           <h2 className="text-lg font-semibold">Library Stats</h2>
           <button
             onClick={() => showHelp("home.stats")}
-            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            className="p-2 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50 min-w-[44px] min-h-[44px] flex items-center justify-center"
             aria-label="Help: Library Stats"
           >
-            <HelpCircle size={14} />
+            <HelpCircle size={16} />
           </button>
         </div>
         {statsError ? (
@@ -208,6 +209,16 @@ export default function HomePage() {
       </div>
     </div>
   );
+}
+
+function isRfc1918(host: string): boolean {
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  const [a, b] = [parseInt(parts[0], 10), parseInt(parts[1], 10)];
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
 }
 
 function Stat({ label, value }: { label: string; value: number | string }) {

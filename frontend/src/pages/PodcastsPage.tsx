@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
-  Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown, HelpCircle
+  Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown, HelpCircle, AlertCircle
 } from "lucide-react";
 import { api, PodcastFeed, PodcastEpisode, Track } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
@@ -15,6 +15,7 @@ export default function PodcastsPage() {
   const [selectedFeed, setSelectedFeed] = useState<PodcastFeed | null>(null);
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [downloadingIds, setDownloadingIds] = useState<Set<number>>(new Set());
   const pollIntervals = useRef<Map<number, ReturnType<typeof setInterval>>>(new Map());
@@ -33,6 +34,7 @@ export default function PodcastsPage() {
     try {
       const f = await api.podcastFeeds();
       setFeeds(f);
+      setError(null);
       // Use ref to read current selectedFeed without adding it as a dependency
       const current = selectedFeedRef.current;
       if (f.length > 0 && !current) {
@@ -41,8 +43,9 @@ export default function PodcastsPage() {
         const updated = f.find((x) => x.id === current.id);
         if (updated) setSelectedFeed(updated);
       }
-    } catch {
-      /* ignore */
+    } catch (e: any) {
+      console.error("[podcasts] loadFeeds failed:", e);
+      setError(e.message || "Failed to load podcast feeds");
     } finally {
       setLoading(false);
     }
@@ -52,10 +55,11 @@ export default function PodcastsPage() {
     try {
       const eps = await api.podcastEpisodes(feedId);
       setEpisodes(eps);
-    } catch {
-      /* ignore */
+    } catch (e: any) {
+      console.error("[podcasts] loadEpisodes failed:", e);
+      toast.error(`Failed to load episodes: ${e.message || "unknown error"}`);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     loadFeeds();
@@ -84,6 +88,16 @@ export default function PodcastsPage() {
     try {
       await api.podcastUnsubscribe(feedId);
       toast.success("Unsubscribed");
+      // Stop any active downloads for this feed
+      setDownloadingIds((prev) => {
+        const next = new Set(prev);
+        // Clear all downloading IDs since we're unsubscribing
+        next.clear();
+        return next;
+      });
+      // Clear all polling intervals
+      pollIntervals.current.forEach((interval) => clearInterval(interval));
+      pollIntervals.current.clear();
       setSelectedFeed(null);
       await loadFeeds();
     } catch (e: any) {
@@ -95,6 +109,10 @@ export default function PodcastsPage() {
     try {
       await api.podcastDownloadFeed(feedId);
       toast.success("Downloading all episodes...");
+      // Refresh episode list after triggering download
+      if (selectedFeed?.id === feedId) {
+        await loadEpisodes(feedId);
+      }
     } catch (e: any) {
       toast.error("Download failed: " + e.message);
     }
@@ -110,25 +128,16 @@ export default function PodcastsPage() {
       // Long episodes can take a while; allow up to 30 minutes before giving up.
       let attempts = 0;
       const maxAttempts = 600; // 30 minutes at 3s interval
+      // Track the feed ID at poll start time to avoid feed-change bugs
+      const feedIdAtStart = selectedFeed.id;
       // Clear any existing interval for this episode before starting a new one
       const existing = pollIntervals.current.get(episode.id);
       if (existing) clearInterval(existing);
       const interval = setInterval(async () => {
         attempts++;
         try {
-          // Re-read selectedFeed from ref to avoid stale closure
-          const currentFeed = selectedFeedRef.current;
-          if (!currentFeed) {
-            clearInterval(interval);
-            pollIntervals.current.delete(episode.id);
-            setDownloadingIds((prev) => {
-              const next = new Set(prev);
-              next.delete(episode.id);
-              return next;
-            });
-            return;
-          }
-          const eps = await api.podcastEpisodes(currentFeed.id);
+          // Use the feed ID from when polling started, not the current selection
+          const eps = await api.podcastEpisodes(feedIdAtStart);
           const updated = eps.find((e) => e.id === episode.id);
           if (!updated) {
             // Episode no longer exists in feed — stop polling
@@ -150,6 +159,10 @@ export default function PodcastsPage() {
             clearInterval(interval);
             pollIntervals.current.delete(episode.id);
             toast.success(`Downloaded "${episode.title}"`);
+            // Refresh episodes if we're still on this feed
+            if (selectedFeedRef.current?.id === feedIdAtStart) {
+              setEpisodes(eps);
+            }
           } else if (updated.download_error) {
             setDownloadingIds((prev) => {
               const next = new Set(prev);
@@ -229,22 +242,38 @@ export default function PodcastsPage() {
         <h1 className="text-2xl font-semibold flex items-center gap-2">
           <Rss className="text-accent" /> Podcasts
         </h1>
-        <button
-          onClick={() => showHelp("podcasts.feeds")}
-          className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
-          aria-label="Help: Podcasts"
-        >
-          <HelpCircle size={16} />
-        </button>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="px-3 py-2 bg-accent text-bg rounded-md font-medium flex items-center gap-2 text-sm"
-        >
-          <Plus size={14} /> Add Podcast
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => showHelp("podcasts.feeds")}
+            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+            aria-label="Help: Podcasts"
+          >
+            <HelpCircle size={16} />
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="px-3 py-2 bg-accent text-bg rounded-md font-medium flex items-center gap-2 text-sm"
+          >
+            <Plus size={14} /> Add Podcast
+          </button>
+        </div>
       </div>
 
-      {(!feeds || feeds.length === 0) ? (
+      {/* Error banner */}
+      {error && (
+        <div className="bg-red-900/30 border border-red-500/40 rounded-lg p-3 flex items-center gap-3">
+          <AlertCircle size={18} className="text-red-400 shrink-0" />
+          <p className="text-sm text-red-300 flex-1">{error}</p>
+          <button
+            onClick={() => { setError(null); setLoading(true); loadFeeds(); }}
+            className="text-xs text-red-400 hover:text-red-300 underline shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {(!feeds || feeds.length === 0 && !error) ? (
         <div className="bg-panel rounded-lg p-8 border border-panel2 text-center">
           <Rss size={32} className="mx-auto mb-3 text-muted" />
           <p className="text-muted mb-4">
@@ -260,7 +289,7 @@ export default function PodcastsPage() {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
           {/* Sidebar — Feed list */}
-          <div className="lg:col-span-1 space-y-2">
+          <div className="lg:col-span-1 space-y-2 max-h-[calc(100vh-12rem)] overflow-y-auto">
             {feeds && feeds.map((feed) => (
               <button
                 key={feed.id}
@@ -270,6 +299,7 @@ export default function PodcastsPage() {
                     ? "bg-panel border-accent"
                     : "bg-panel border-panel2 hover:border-accent/40"
                 }`}
+                aria-label={`${feed.title}, ${feed.episode_count} episodes`}
               >
                 <div className="flex items-center gap-3">
                   {feed.image_url ? (
@@ -277,6 +307,7 @@ export default function PodcastsPage() {
                       src={feed.image_url}
                       alt=""
                       className="w-10 h-10 rounded object-cover bg-panel2"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                     />
                   ) : (
                     <div className="w-10 h-10 rounded bg-panel2 flex items-center justify-center">
@@ -313,6 +344,7 @@ export default function PodcastsPage() {
                       onClick={() => handleDownloadFeed(selectedFeed.id)}
                       className="p-2 rounded-md hover:bg-panel2 transition-colors text-accent"
                       title="Download all episodes"
+                      aria-label="Download all episodes"
                     >
                       <Download size={14} />
                     </button>
@@ -320,6 +352,7 @@ export default function PodcastsPage() {
                       onClick={() => handleSync(selectedFeed.id)}
                       className="p-2 rounded-md hover:bg-panel2 transition-colors"
                       title="Sync feed"
+                      aria-label="Sync feed"
                     >
                       <RefreshCw size={14} />
                     </button>
@@ -327,6 +360,7 @@ export default function PodcastsPage() {
                       onClick={() => handleUnsubscribe(selectedFeed.id)}
                       className="p-2 rounded-md hover:bg-panel2 transition-colors text-red-400"
                       title="Unsubscribe"
+                      aria-label="Unsubscribe from podcast"
                     >
                       <Trash2 size={14} />
                     </button>
@@ -388,7 +422,7 @@ export default function PodcastsPage() {
                             {hasProgress && progressPct > 0 && (
                               <div className="mt-2">
                                 <div className="flex items-center gap-2">
-                                  <div className="flex-1 h-1 bg-panel2 rounded-full overflow-hidden">
+                                  <div className="flex-1 h-1 bg-panel2 rounded-full overflow-hidden" role="progressbar" aria-valuenow={progressPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Playback progress: ${progressPct}%`}>
                                     <div
                                       className="h-full bg-accent rounded-full transition-all"
                                       style={{ width: `${progressPct}%` }}
@@ -410,6 +444,7 @@ export default function PodcastsPage() {
                                 onClick={() => handlePlayEpisode(Number(ep.id), ep.title, hasProgress ? ep.playback_position_sec : 0)}
                                 className="p-2 rounded-md hover:bg-panel2 transition-colors text-accent"
                                 title={hasProgress ? `Resume from ${formatTime(ep.playback_position_sec)}` : "Play"}
+                                aria-label={hasProgress ? `Resume "${ep.title}" from ${formatTime(ep.playback_position_sec)}` : `Play "${ep.title}"`}
                               >
                                 <Play size={14} />
                               </button>
@@ -419,6 +454,7 @@ export default function PodcastsPage() {
                                 disabled={downloadingIds.has(ep.id)}
                                 className="p-2 rounded-md hover:bg-panel2 transition-colors disabled:opacity-50"
                                 title="Download"
+                                aria-label={`Download "${ep.title}"`}
                               >
                                 {downloadingIds.has(ep.id) ? (
                                   <Loader2 size={14} className="animate-spin" />
@@ -469,11 +505,45 @@ function AddPodcastModal({
   onClose: () => void;
   onSubscribe: (url: string) => Promise<void>;
 }) {
-  const [tab, setTab] = useState<"url" | "search">("url");
   const [url, setUrl] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
   const [subscribing, setSubscribing] = useState(false);
   const [error, setError] = useState("");
+  const modalRef = useRef<HTMLDivElement>(null);
+  const firstFocusableRef = useRef<HTMLInputElement>(null);
+  const lastFocusableRef = useRef<HTMLButtonElement>(null);
+
+  // Focus trap
+  useEffect(() => {
+    // Focus the input on mount
+    firstFocusableRef.current?.focus();
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "Tab" && modalRef.current) {
+        const focusable = modalRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -490,77 +560,54 @@ function AddPodcastModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-      <div className="bg-panel rounded-lg border border-panel2 w-full max-w-md shadow-xl">
+    <div
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={modalRef}
+        className="bg-panel rounded-lg border border-panel2 w-full max-w-md shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add Podcast"
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b border-panel2">
           <h2 className="text-lg font-semibold">Add Podcast</h2>
-          <button onClick={onClose} className="p-1 rounded hover:bg-panel2 transition-colors">
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-panel2 transition-colors"
+            aria-label="Close"
+            ref={lastFocusableRef}
+          >
             <X size={16} />
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b border-panel2">
+        <form onSubmit={handleSubmit} className="p-4 space-y-3">
+          <input
+            ref={firstFocusableRef}
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://example.com/feed.xml"
+            className="w-full bg-bg border border-panel2 rounded-md px-3 py-2 outline-none focus:border-accent text-sm"
+            disabled={subscribing}
+          />
+          {error && <p className="text-xs text-red-400">{error}</p>}
           <button
-            onClick={() => setTab("url")}
-            className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-              tab === "url" ? "text-accent border-b-2 border-accent" : "text-muted"
-            }`}
+            type="submit"
+            disabled={subscribing || !url.trim()}
+            className="w-full px-4 py-2 bg-accent text-bg rounded-md font-medium flex items-center justify-center gap-2 disabled:opacity-50"
           >
-            Paste RSS URL
+            {subscribing ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Rss size={14} />
+            )}
+            {subscribing ? "Subscribing..." : "Subscribe"}
           </button>
-          <button
-            onClick={() => setTab("search")}
-            className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-              tab === "search" ? "text-accent border-b-2 border-accent" : "text-muted"
-            }`}
-          >
-            <Search size={14} className="inline mr-1" />
-            Search
-          </button>
-        </div>
-
-        <div className="p-4">
-          {tab === "url" ? (
-            <form onSubmit={handleSubmit} className="space-y-3">
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/feed.xml"
-                className="w-full bg-bg border border-panel2 rounded-md px-3 py-2 outline-none focus:border-accent text-sm"
-                autoFocus
-              />
-              {error && <p className="text-xs text-red-400">{error}</p>}
-              <button
-                type="submit"
-                disabled={subscribing || !url.trim()}
-                className="w-full px-4 py-2 bg-accent text-bg rounded-md font-medium flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                {subscribing ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <Rss size={14} />
-                )}
-                {subscribing ? "Subscribing..." : "Subscribe"}
-              </button>
-            </form>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-muted">
-                Search for podcasts by name or topic. (Requires web search to be enabled.)
-              </p>
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="e.g. true crime, tech news..."
-                className="w-full bg-bg border border-panel2 rounded-md px-3 py-2 outline-none focus:border-accent text-sm"
-              />
-              <p className="text-xs text-muted">
-                💡 Tip: Use the chat on the Discover page to find podcasts by topic!
-              </p>
-            </div>
-          )}
-        </div>
+        </form>
       </div>
     </div>
   );

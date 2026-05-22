@@ -194,7 +194,7 @@ export default function MobilePlayerBar() {
 
           {/* Device Picker */}
           <div className="flex items-center justify-center px-6 pb-6">
-            <DevicePicker currentTrack={t} />
+            <DevicePicker currentTrack={t} queue={p.queue} position={p.position} />
           </div>
         </div>
       )}

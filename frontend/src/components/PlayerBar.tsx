@@ -122,7 +122,7 @@ export default function PlayerBar() {
 
         {/* DevicePicker */}
         <div className="flex items-center gap-1 flex-shrink-0">
-          <DevicePicker currentTrack={t} />
+          <DevicePicker currentTrack={t} queue={p.queue} position={p.position} />
           <button
             onClick={() => showHelp("player.controls")}
             className="p-1 text-muted/40 hover:text-accent transition-colors"
