@@ -338,8 +338,8 @@ Lexicon uses your listening history to generate personalized recommendations. Th
 **Available charts:**
 • **Top Artists** — Your most-played artists
 • **Top Genres** — Your genre distribution
-• **Listening Timeline** — When you listen most
-• **Recently Added** — Newest tracks in your library
+• **Listening Heatmap** — When you listen most (day of week × hour)
+• **Top Tracks** — Your most-played tracks
 
 **Data sources:**
 • Local playback history

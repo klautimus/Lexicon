@@ -1,14 +1,34 @@
 const API = "/api";
+const SESSION_KEY = "lexicon_session";
+
+let sessionToken: string | null = localStorage.getItem(SESSION_KEY);
+
+export function setSessionToken(token: string | null) {
+  sessionToken = token;
+  if (token) {
+    localStorage.setItem(SESSION_KEY, token);
+  } else {
+    localStorage.removeItem(SESSION_KEY);
+  }
+}
+
+export function getSessionToken(): string | null {
+  return sessionToken;
+}
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "ngrok-skip-browser-warning": "1",
+    ...(init?.headers as Record<string, string> || {}),
+  };
+  if (sessionToken) {
+    headers["Authorization"] = `Bearer ${sessionToken}`;
+  }
   let r: Response;
   try {
     r = await fetch(API + path, {
-      headers: {
-        "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "1",
-        ...(init?.headers || {}),
-      },
+      headers,
       ...init,
     });
   } catch (e: any) {
@@ -28,6 +48,12 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
       throw new Error(
         "Request blocked by ngrok free tier. Please refresh the page and click 'Visit Site' to continue."
       );
+    }
+    // Global 401 handler: auto-logout on auth failure
+    if (r.status === 401) {
+      setSessionToken(null);
+      window.location.href = "/login";
+      throw new Error("Session expired. Redirecting to login…");
     }
     throw new Error(`${r.status} ${text}`);
   }
@@ -56,8 +82,8 @@ export const api = {
   albums: () => j<Album[]>("/library/albums"),
   artists: () => j<Artist[]>("/library/artists"),
   podcasts: () => j<Podcast[]>("/library/podcasts"),
-  search: (q: string) =>
-    j<Track[]>(`/library/search?q=${encodeURIComponent(q)}`),
+  search: (q: string, init?: RequestInit) =>
+    j<Track[]>(`/library/search?q=${encodeURIComponent(q)}`, init),
   track: (id: number) => j<Track>(`/library/track/${id}`),
   streamUrl: (id: number) => `${API}/stream/${id}`,
   coverUrl: (id: number) => `${API}/library/cover/${id}`,
@@ -77,11 +103,12 @@ export const api = {
       "/recommendations"
     ),
   refreshRecs: () =>
-    j<RecsPayload>("/recommendations/refresh", { method: "POST" }),
-  chat: (message: string) =>
+    j<RecsPayload & { created_at?: number }>("/recommendations/refresh", { method: "POST" }),
+  chat: (message: string, signal?: AbortSignal) =>
     j<{ reply: string; playlist?: PlaylistPayload }>("/recommendations/chat", {
       method: "POST",
       body: JSON.stringify({ message }),
+      signal,
     }),
   generatePlaylist: (force?: boolean, count?: number) => {
     let url = '/recommendations/playlist';
@@ -140,6 +167,7 @@ export const api = {
   downloadJob: (id: string) => j<DownloadJob>(`/download/jobs/${id}`),
   downloadCancel: (id: string) =>
     j<{ ok: boolean }>(`/download/jobs/${id}/cancel`, { method: "POST" }),
+  downloadProgress: () => j<DownloadJob[]>("/download/progress"),
   playlists: () => j<Playlist[]>('/playlists'),
   createPlaylist: (name: string) =>
     j<Playlist>('/playlists', { method: 'POST', body: JSON.stringify({ name }) }),
@@ -191,6 +219,20 @@ export const api = {
   spotifyDevices: () => j<SpotifyDevice[]>('/spotify/devices'),
   spotifyTransfer: (deviceId: string, play: boolean) =>
     j<{ ok: boolean }>('/spotify/transfer', { method: 'POST', body: JSON.stringify({ device_id: deviceId, play }) }),
+
+  // Auth
+  login: (username: string, password: string) =>
+    j<LoginResponse>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  logout: () =>
+    j<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+  me: () =>
+    j<{ user: User }>('/auth/me'),
+  users: () =>
+    j<User[]>('/auth/users'),
+  createUser: (username: string, password: string, displayName: string) =>
+    j<{ user: User }>('/auth/users', { method: 'POST', body: JSON.stringify({ username, password, display_name: displayName }) }),
+  deleteUser: (userId: number) =>
+    j<{ ok: boolean }>(`/auth/users/${userId}`, { method: 'DELETE' }),
 };
 
 export interface DownloadStatus {
@@ -214,6 +256,8 @@ export interface DownloadJob {
   used_fallback?: boolean;
   track_id?: number;
   kind?: string; // "music" (default) or "podcast"
+  progress?: number; // 0-100 download percentage
+  progress_label?: string; // e.g. "1/5 tracks", "45.2%"
   log?: string[];
 }
 
@@ -407,4 +451,17 @@ export interface SpotifyDevice {
   is_active: boolean;
   is_restricted: boolean;
   volume_percent: number;
+}
+
+// Auth types
+export interface User {
+  id: number;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+}
+
+export interface LoginResponse {
+  token: string;
+  user: User;
 }

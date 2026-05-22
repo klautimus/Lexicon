@@ -9,6 +9,10 @@ export interface PlayerCommand {
   track?: any;
   duration?: number;
   device?: string;
+  tracks?: any[];
+  queue?: any[];
+  currentTrack?: any;
+  start_index?: number;
 }
 
 export interface PlayerState {
@@ -30,6 +34,20 @@ export interface DeviceList {
   }>;
 }
 
+export interface PromotedMessage {
+  type: "promoted";
+  queue?: any[];
+  currentTrack?: any;
+  tracks?: any[];
+  track?: any;
+  position?: number;
+  start_index?: number;
+}
+
+export interface DemotedMessage {
+  type: "demoted";
+}
+
 type MessageHandler = (msg: PlayerState | DeviceList) => void;
 
 const WS_RETRY_DELAY = 3000;
@@ -45,6 +63,9 @@ export class PlayerWebSocket {
   private handlers: MessageHandler[] = [];
   private stateHandlers: MessageHandler[] = [];
   private deviceHandlers: MessageHandler[] = [];
+  private promotedHandlers: ((msg: PromotedMessage) => void)[] = [];
+  private demotedHandlers: (() => void)[] = [];
+  private transferHandlers: ((msg: any) => void)[] = [];
   private intentionalClose = false;
 
   constructor() {
@@ -91,6 +112,12 @@ export class PlayerWebSocket {
             this.stateHandlers.forEach((h) => h(msg));
           } else if (msg.type === "devices") {
             this.deviceHandlers.forEach((h) => h(msg));
+          } else if (msg.type === "promoted") {
+            this.promotedHandlers.forEach((h) => h(msg));
+          } else if (msg.type === "demoted") {
+            this.demotedHandlers.forEach((h) => h());
+          } else if (msg.type === "transfer") {
+            this.transferHandlers.forEach((h) => h(msg));
           }
           this.handlers.forEach((h) => h(msg));
         } catch {
@@ -149,8 +176,8 @@ export class PlayerWebSocket {
     this.send({ type: "seek", position });
   }
 
-  transfer(target: string): void {
-    this.send({ type: "transfer", target });
+  transfer(target: string, queue?: any[], currentTrack?: any, position?: number): void {
+    this.send({ type: "transfer", target, queue, currentTrack, position });
   }
 
   onState(handler: MessageHandler): void {
@@ -159,6 +186,18 @@ export class PlayerWebSocket {
 
   onDevices(handler: MessageHandler): void {
     this.deviceHandlers.push(handler);
+  }
+
+  onPromoted(handler: (msg: PromotedMessage) => void): void {
+    this.promotedHandlers.push(handler);
+  }
+
+  onDemoted(handler: () => void): void {
+    this.demotedHandlers.push(handler);
+  }
+
+  onTransfer(handler: (msg: any) => void): void {
+    this.transferHandlers.push(handler);
   }
 
   getDeviceID(): string {

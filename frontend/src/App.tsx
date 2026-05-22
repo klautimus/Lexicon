@@ -1,4 +1,4 @@
-import { Routes, Route, NavLink } from "react-router-dom";
+import { Routes, Route, NavLink, Navigate } from "react-router-dom";
 import {
   Library,
   Music,
@@ -11,14 +11,20 @@ import {
   ListMusic,
   Settings as SettingsIcon,
   HelpCircle,
+  User,
+  LogOut,
+  Shield,
+  Loader2,
 } from "lucide-react";
 import { PlayerProvider } from "./player/PlayerContext";
 import { ToastProvider } from "./contexts/ToastContext";
 import { DownloadProvider } from "./contexts/DownloadContext";
 import { HelpProvider, useHelp } from "./contexts/HelpContext";
+import { UserProvider, useUser } from "./contexts/UserContext";
 import PlayerBar from "./components/PlayerBar";
 import MobileNavBar from "./components/MobileNavBar";
 import MobilePlayerBar from "./components/MobilePlayerBar";
+import DownloadProgressBar from "./components/DownloadProgressBar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useIsMobile } from "./hooks/useIsMobile";
 import HomePage from "./pages/HomePage";
@@ -31,6 +37,8 @@ import SettingsPage from "./pages/SettingsPage";
 import DownloadsPage from "./pages/DownloadsPage";
 import PlaylistsPage from "./pages/PlaylistsPage";
 import PlaylistPage from "./pages/PlaylistPage";
+import LoginPage from "./pages/LoginPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
 import { api } from "./lib/api";
 
 const navItems = [
@@ -81,8 +89,52 @@ function NavItem({ item, onClick }: { item: typeof navItems[0]; onClick?: () => 
   );
 }
 
+// Auth guard: redirects to /login if no valid session
+function AuthGuard({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useUser();
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-bg">
+        <Loader2 size={24} className="animate-spin text-muted" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <>{children}</>;
+}
+
+// Admin guard: redirects to / if not admin
+function AdminGuard({ children }: { children: React.ReactNode }) {
+  const { user, isAdmin, loading } = useUser();
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-bg">
+        <Loader2 size={24} className="animate-spin text-muted" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!isAdmin) {
+    return <Navigate to="/" replace />;
+  }
+
+  return <>{children}</>;
+}
+
 function DesktopLayout() {
   const { showHelp } = useHelp();
+  const { user, logout, isAdmin } = useUser();
+
   return (
     <div className="flex h-screen">
       <aside className="w-56 bg-panel border-r border-black/40 flex flex-col">
@@ -111,9 +163,44 @@ function DesktopLayout() {
             <HelpCircle size={12} /> Help
           </button>
         </div>
+
+        {/* User section */}
+        {user && (
+          <div className="p-2 border-t border-black/40 space-y-1">
+            <div className="flex items-center gap-2 px-2 py-1.5">
+              <User size={14} className="text-muted flex-shrink-0" />
+              <span className="text-sm text-text truncate">
+                {user.display_name || user.username}
+              </span>
+              {isAdmin && (
+                <span title="Admin">
+                  <Shield size={12} className="text-accent/70 flex-shrink-0" />
+                </span>
+              )}
+            </div>
+            <div className="flex gap-1 px-1">
+              {isAdmin && (
+                <NavLink
+                  to="/settings/users"
+                  className="text-xs text-muted hover:text-text px-2 py-1 rounded transition-colors hover:bg-panel2/50"
+                >
+                  Users
+                </NavLink>
+              )}
+              <button
+                onClick={logout}
+                className="text-xs text-muted hover:text-red-400 px-2 py-1 rounded transition-colors hover:bg-panel2/50 flex items-center gap-1"
+              >
+                <LogOut size={11} />
+                Logout
+              </button>
+            </div>
+          </div>
+        )}
       </aside>
 
       <main className="flex-1 flex flex-col overflow-hidden">
+        <DownloadProgressBar />
         <div className="flex-1 overflow-auto p-6">
           <Routes>
             <Route path="/" element={<HomePage />} />
@@ -126,6 +213,7 @@ function DesktopLayout() {
             <Route path="/playlists/:id" element={<PlaylistPage />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/users" element={<AdminGuard><AdminUsersPage /></AdminGuard>} />
           </Routes>
         </div>
         <PlayerBar />
@@ -135,8 +223,31 @@ function DesktopLayout() {
 }
 
 function MobileLayout() {
+  const { user, logout, isAdmin } = useUser();
+
   return (
     <div className="flex flex-col h-screen pb-14">
+      {/* User bar (top) */}
+      {user && (
+        <div className="flex items-center justify-between px-4 py-1.5 bg-panel border-b border-black/40 text-xs flex-shrink-0">
+          <span className="text-muted flex items-center gap-1.5 truncate">
+            <User size={12} className="flex-shrink-0" />
+            {user.display_name || user.username}
+            {isAdmin && (
+              <Shield size={10} className="text-accent/70 flex-shrink-0" />
+            )}
+          </span>
+          <button
+            onClick={logout}
+            className="text-muted hover:text-red-400 flex items-center gap-1 transition-colors"
+          >
+            <LogOut size={11} />
+            Logout
+          </button>
+        </div>
+      )}
+
+      <DownloadProgressBar />
       <main className="flex-1 overflow-auto p-4 pb-28">
         <Routes>
           <Route path="/" element={<HomePage />} />
@@ -149,6 +260,7 @@ function MobileLayout() {
           <Route path="/playlists/:id" element={<PlaylistPage />} />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings/users" element={<AdminGuard><AdminUsersPage /></AdminGuard>} />
         </Routes>
       </main>
       <MobilePlayerBar />
@@ -159,7 +271,20 @@ function MobileLayout() {
 
 function AppContent() {
   const isMobile = useIsMobile();
-  return isMobile ? <MobileLayout /> : <DesktopLayout />;
+
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        path="*"
+        element={
+          <AuthGuard>
+            {isMobile ? <MobileLayout /> : <DesktopLayout />}
+          </AuthGuard>
+        }
+      />
+    </Routes>
+  );
 }
 
 export default function App() {
@@ -169,7 +294,9 @@ export default function App() {
         <PlayerProvider>
           <DownloadProvider>
             <HelpProvider>
-              <AppContent />
+              <UserProvider>
+                <AppContent />
+              </UserProvider>
             </HelpProvider>
           </DownloadProvider>
         </PlayerProvider>

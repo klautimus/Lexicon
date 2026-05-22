@@ -119,6 +119,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (!a || audioCtxRef.current) return;
     try {
       const ctx = new AudioContext();
+      ctx.resume(); // Required: AudioContext starts suspended due to autoplay policy
       audioCtxRef.current = ctx;
       const source = ctx.createMediaElementSource(a);
       const compressor = ctx.createDynamicsCompressor();
@@ -187,6 +188,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const a = audioRef.current!;
     a.pause();
     initAudioPipeline();
+    // Ensure AudioContext is running (browsers may suspend it)
+    if (audioCtxRef.current?.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
     a.src = api.streamUrl(t.id);
     a.play()
       .then(() => {
@@ -400,17 +405,50 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         prev();
       } else if (msg.type === "seek" && msg.position !== undefined) {
         seekFn(msg.position);
-      } else if (msg.type === "transfer") {
-        const a = audioRef.current;
-        if (a) a.pause();
-        isWsPlayerRef.current = false;
       }
     });
+
+    // Handle role reassignment: this device becomes the audio player
+    ws.onPromoted((msg) => {
+      isWsPlayerRef.current = true;
+      // Accept queue + track from the transferring device
+      const tracks = msg.queue || msg.tracks;
+      const track = msg.currentTrack || msg.track;
+      if (tracks && track && tracks.length > 0) {
+        clearSkipTimeout();
+        consecutiveErrorsRef.current = 0;
+        originalQueueRef.current = [...tracks];
+        shuffledRef.current = false;
+        setState((s) => ({
+          ...s,
+          queue: tracks,
+          index: 0,
+          current: track,
+          shuffled: false,
+        }));
+        loadAndPlay(track);
+      }
+    });
+
+    // Handle role reassignment: this device becomes a passive controller
+    ws.onDemoted(() => {
+      const a = audioRef.current;
+      if (a) a.pause();
+      isWsPlayerRef.current = false;
+      setState((s) => ({ ...s, playing: false }));
+    });
+
+    // DEAD CODE (T8 fix): onTransfer was never sent by the hub.
+    // The hub now sends the queue + currentTrack directly in the transfer
+    // message passed to handleTransfer, which builds the promoted message.
+    // Queue continuity is handled upstream — no per-client transfer handshake.
+    // ws.onTransfer((msg: any) => { ... });
+
 
     return () => {
       ws.disconnect();
     };
-  }, [playFn, next, prev, seekFn]);
+  }, [playFn, next, prev, seekFn, loadAndPlay, clearSkipTimeout]);
 
   // Keep a ref to the latest state so broadcastState doesn't need to be
   // recreated on every tick of the Spotify poller (which sets state every 1s).
@@ -429,6 +467,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       position: s.position,
       duration: s.duration,
       device: "host",
+      tracks: s.queue,
+      start_index: s.index,
     });
   }, []);
 
