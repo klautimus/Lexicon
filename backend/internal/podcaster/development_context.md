@@ -1,8 +1,8 @@
 # podcaster — Development Context
 
 > **Parent:** [backend](../development_context.md)
-|> **File:** `backend/internal/podcaster/podcaster.go` (~960 LOC) — 🆕 NEW in v2.8.0
-> **Last updated:** 2026-05-18
+> **File:** `backend/internal/podcaster/podcaster.go` (~1260 LOC) — 🆕 NEW in v2.8.0, updated v3.5.3
+> **Last updated:** 2026-05-21
 
 ## Purpose
 
@@ -132,7 +132,39 @@ Podcast episodes had no playback position tracking. Users couldn't resume from w
 - `handlePlayEpisode`: accepts optional `startPositionSec` parameter and seeks after loading
 - `api.ts`: added `podcastEpisodePosition()`, `savePodcastEpisodePosition()`, and `PodcastEpisode` type updated with new fields
 
-## Working Here
+## Phase 8: Concurrency Control & Shutdown Grace Period (v3.5.3)
+
+### Problem
+Podcast downloads suffered from "context canceled" errors during app shutdown. The root cause was that `Shutdown()` immediately fired `shutdownCancel()` with zero grace period. Additionally, there was no concurrency control — any number of download goroutines could be spawned simultaneously.
+
+### Changes Made
+
+#### Concurrency control
+- Added `sema chan struct{}` (capacity 3) to `API` struct — mirrors music downloader's semaphore pattern
+- Added `inflight atomic.Int64` counter for status API
+- Removed dead `mu sync.Mutex` field (never used)
+- All 3 fire-and-forget goroutine entry points (`syncFeed`, `downloadEpisode`, `downloadFeed`) now:
+  1. Acquire semaphore slot before spawning goroutine
+  2. Increment inflight counter
+  3. Defer release + decrement
+  4. Include panic recovery with stack trace logging
+
+#### Shutdown grace period
+- `Shutdown()` rewritten: waits up to 30s for in-flight downloads to complete (by draining semaphore), then cancels context
+- Logs: `"[podcaster] all downloads completed before shutdown"` or `"[podcaster] shutdown: 30s grace period expired, cancelling N remaining downloads"`
+
+#### Shutdown sequence (main.go)
+- Reordered: subsystems shut down BEFORE HTTP server (previously: HTTP server first killed handlers, then subsystems were cancelled)
+- New order: podcastAPI.Shutdown() → dlAPI.Shutdown() → ... → srv.Shutdown()
+- Signal name now logged: `"[lexicon] received SIGTERM, shutting down..."` instead of generic `"shutting down..."`
+
+#### Status API
+- `GET /api/podcasts/status` now returns `"inflight_downloads"` field showing active download count
+
+#### Hardening
+- `doSyncFeed`: added `http.Client{Timeout: 30s}` to gofeed parser (was unbounded)
+- `downloadDirectAudio`: removed redundant `http.Client{Timeout: 30m}` (context already has timeout); added dedicated `http.Transport` with generous timeouts for large podcast files
+- `downloadDirectAudio`: added 2 GB `io.LimitReader` on response body to prevent disk exhaustion from misconfigured CDNs
 
 - Adding a new feed field: update `podcast_feeds` table in `db.go`, update `subscribe()` and `doSyncFeed()`
 - Adding a new episode field: update `podcast_episodes` table in `db.go`, update `subscribe()` and `doSyncFeed()`

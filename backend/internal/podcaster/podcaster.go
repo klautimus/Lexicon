@@ -22,10 +22,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -58,16 +60,17 @@ type API struct {
 	cfg            Config
 	rescan         func()
 	jobs           JobSink
-	mu             sync.Mutex
+	sema           chan struct{}     // max 3 concurrent downloads + shutdown drain
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
+	inflight       atomic.Int64      // in-flight download count for status API
 }
 
 // New constructs a podcaster API. `jobs` may be nil — in which case downloads
 // still work but won't appear on the Downloads page. Pass *downloader.API.
 func New(db *sql.DB, cfg Config, rescan func(), jobs JobSink) *API {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	return &API{db: db, cfg: cfg, rescan: rescan, jobs: jobs, shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel}
+	return &API{db: db, cfg: cfg, rescan: rescan, jobs: jobs, shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, sema: make(chan struct{}, 3)}
 }
 
 func (a *API) Mount(r chi.Router) {
@@ -84,12 +87,34 @@ func (a *API) Mount(r chi.Router) {
 	r.Get("/api/podcasts/episodes/{id}/track", a.episodeTrack)
 }
 
-// Shutdown signals all in-flight podcaster goroutines to cancel.
-// Call this before shutting down the HTTP server so that doSyncFeed /
-// doDownloadEpisode / doDownloadFeed goroutines observe the cancelled
-// context and exit promptly.
+// Shutdown signals all in-flight podcaster goroutines to finish gracefully.
+// It first waits up to 30 seconds for downloads to complete on their own,
+// then cancels the shutdown context to force-terminate any remaining.
+// This matches the music downloader's semaphore drain pattern (downloader.go
+// Shutdown()) but adds a grace period before cancellation since podcast files
+// are 10-20x larger than music files.
 func (a *API) Shutdown() {
-	a.shutdownCancel()
+	done := make(chan struct{})
+	go func() {
+		// Acquire ALL semaphore slots — blocks until every in-flight goroutine
+		// has released its slot (i.e., completed or errored out).
+		for i := 0; i < cap(a.sema); i++ {
+			a.sema <- struct{}{}
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Printf("[podcaster] all downloads completed before shutdown")
+	case <-time.After(30 * time.Second):
+		log.Printf("[podcaster] shutdown: 30s grace period expired, cancelling %d remaining downloads",
+			a.inflight.Load())
+		a.shutdownCancel()
+		// Drain semaphore after cancellation so Shutdown() returns.
+		for i := 0; i < cap(a.sema); i++ {
+			a.sema <- struct{}{}
+		}
+	}
 }
 
 // jobContext returns the shutdown context for fire-and-forget goroutines.
@@ -246,8 +271,9 @@ func isPrivateHost(host string) bool {
 func (a *API) status(w http.ResponseWriter, _ *http.Request) {
 	available := a.cfg.PoddlBin != ""
 	writeJSON(w, map[string]interface{}{
-		"available": available,
-		"bin":       a.cfg.PoddlBin,
+		"available":          available,
+		"bin":                a.cfg.PoddlBin,
+		"inflight_downloads": a.inflight.Load(),
 	})
 }
 
@@ -604,7 +630,16 @@ func (a *API) syncFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.sema <- struct{}{}
+	a.inflight.Add(1)
 	go func() {
+		defer func() { <-a.sema }()
+		defer a.inflight.Add(-1)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[podcaster] PANIC in syncFeed(feedID=%d): %v\n%s", feedID, r, debug.Stack())
+			}
+		}()
 		if err := a.doSyncFeed(a.jobContext(r.Context()), feedID, feedURL); err != nil {
 			log.Printf("[podcaster] sync feed %d error: %v", feedID, err)
 		}
@@ -623,6 +658,9 @@ func (a *API) doSyncFeed(ctx context.Context, feedID int64, feedURL string) erro
 	}
 
 	fp := gofeed.NewParser()
+	fp.Client = &http.Client{
+		Timeout: 30 * time.Second,
+	}
 	feed, err := fp.ParseURL(feedURL)
 	if err != nil {
 		a.db.ExecContext(ctx, `UPDATE podcast_feeds SET last_error=? WHERE id=?`, err.Error(), feedID)
@@ -710,7 +748,18 @@ func (a *API) downloadEpisode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go a.doDownloadEpisode(a.jobContext(r.Context()), episodeID, feedID, feedURL, feedTitle, audioURL, audioType, episodeTitle)
+	a.sema <- struct{}{}
+	a.inflight.Add(1)
+	go func() {
+		defer func() { <-a.sema }()
+		defer a.inflight.Add(-1)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[podcaster] PANIC in downloadEpisode(episodeID=%d): %v\n%s", episodeID, r, debug.Stack())
+			}
+		}()
+		a.doDownloadEpisode(a.jobContext(r.Context()), episodeID, feedID, feedURL, feedTitle, audioURL, audioType, episodeTitle)
+	}()
 
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -787,9 +836,20 @@ func (a *API) downloadDirectAudio(ctx context.Context, jobID string, episodeID, 
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "audio/*, */*;q=0.5")
 
+	// Context already has 30-min timeout (line 825) — no need for Client.Timeout.
+	// Go's setRequestCancel skips nested context creation when deadlines match.
+	// Dedicated transport isolates podcast downloads from DefaultTransport pooling.
 	client := &http.Client{
-		// http.DefaultClient follows up to 10 redirects, which is what we want.
-		Timeout: 30 * time.Minute,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   60 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   30 * time.Second,
+			ResponseHeaderTimeout: 5 * time.Minute,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       30 * time.Second,
+		},
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -821,11 +881,20 @@ func (a *API) downloadDirectAudio(ctx context.Context, jobID string, episodeID, 
 		a.recordEpisodeError(jobID, episodeID, "file create failed: "+err.Error())
 		return
 	}
-	written, copyErr := io.Copy(f, resp.Body)
+	// Cap response body at 2 GB — generous for any real podcast, prevents
+	// disk exhaustion from malicious/misconfigured CDNs.
+	const maxBodySize = 2 << 30 // 2 GB
+	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxBodySize))
 	closeErr := f.Close()
 	if copyErr != nil {
 		_ = os.Remove(outputPath)
 		a.recordEpisodeError(jobID, episodeID, "write failed: "+copyErr.Error())
+		return
+	}
+	if written >= maxBodySize {
+		_ = os.Remove(outputPath)
+		a.recordEpisodeError(jobID, episodeID,
+			fmt.Sprintf("response body exceeded %d byte limit — download aborted", maxBodySize))
 		return
 	}
 	if closeErr != nil {
@@ -970,7 +1039,18 @@ func (a *API) downloadFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go a.doDownloadFeed(a.jobContext(r.Context()), feedID, feedURL, feedTitle)
+	a.sema <- struct{}{}
+	a.inflight.Add(1)
+	go func() {
+		defer func() { <-a.sema }()
+		defer a.inflight.Add(-1)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[podcaster] PANIC in downloadFeed(feedID=%d): %v\n%s", feedID, r, debug.Stack())
+			}
+		}()
+		a.doDownloadFeed(a.jobContext(r.Context()), feedID, feedURL, feedTitle)
+	}()
 
 	writeJSON(w, map[string]bool{"ok": true})
 }

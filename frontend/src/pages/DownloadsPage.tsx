@@ -124,9 +124,11 @@ export default function DownloadsPage() {
               <AlertCircle size={16} /> SpotiFLAC isn't configured.
             </p>
             <p>
-              Set <code className="text-accent">SPOTIFLAC_BIN</code> (path to
-              the spotiflac binary) in <code className="text-accent">backend/.env</code>{" "}
-              and restart the server.
+              In <code className="text-accent">backend/.env</code> set{" "}
+              <code className="text-accent">SPOTIFLAC_BIN</code> (path to binary),{" "}
+              <code className="text-accent">SPOTIFLAC_OUTPUT</code> (download directory), and optionally{" "}
+              <code className="text-accent">SPOTIFLAC_SERVICE</code> (qobuz, amazon, or tidal).
+              Restart the server after configuring.
             </p>
           </div>
         ) : (
