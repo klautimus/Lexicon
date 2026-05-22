@@ -121,10 +121,11 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expiresAt := time.Now().Unix() + int64(tok.ExpiresIn)
+	uid := userIDFromContext(r.Context())
 	if _, err := a.db.ExecContext(r.Context(), `
-		INSERT INTO spotify_tokens(id, access_token, refresh_token, expires_at, scope, user_id, display_name, product, last_synced_at)
-		VALUES(1, ?, ?, ?, ?, ?, ?, ?, 0)
-		ON CONFLICT(id) DO UPDATE SET
+		INSERT INTO spotify_tokens(lexicon_user_id, access_token, refresh_token, expires_at, scope, user_id, display_name, product, last_synced_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0)
+		ON CONFLICT(lexicon_user_id) DO UPDATE SET
 			access_token=excluded.access_token,
 			refresh_token=excluded.refresh_token,
 			expires_at=excluded.expires_at,
@@ -132,7 +133,7 @@ func (a *API) callback(w http.ResponseWriter, r *http.Request) {
 			user_id=excluded.user_id,
 			display_name=excluded.display_name,
 			product=excluded.product
-	`, tok.AccessToken, tok.RefreshToken, expiresAt, tok.Scope, me.ID, me.DisplayName, me.Product); err != nil {
+	`, uid, tok.AccessToken, tok.RefreshToken, expiresAt, tok.Scope, me.ID, me.DisplayName, me.Product); err != nil {
 		log.Printf("[spotify] callback: insert token: %v", err)
 		http.Error(w, err.Error(), 500)
 		return
@@ -217,8 +218,9 @@ type StatusResponse struct {
 
 func (a *API) status(w http.ResponseWriter, r *http.Request) {
 	st := StatusResponse{Configured: a.configured()}
+	uid := userIDFromContext(r.Context())
 	row := a.db.QueryRowContext(r.Context(),
-		`SELECT IFNULL(display_name,''), IFNULL(product,''), IFNULL(user_id,''), last_synced_at FROM spotify_tokens WHERE id=1`)
+		`SELECT IFNULL(display_name,''), IFNULL(product,''), IFNULL(user_id,''), last_synced_at FROM spotify_tokens WHERE lexicon_user_id=?`, uid)
 	var ls int64
 	if err := row.Scan(&st.DisplayName, &st.Product, &st.UserID, &ls); err == nil {
 		st.Connected = true
@@ -229,7 +231,8 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) disconnect(w http.ResponseWriter, r *http.Request) {
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM spotify_tokens WHERE id=1`); err != nil {
+	uid := userIDFromContext(r.Context())
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM spotify_tokens WHERE lexicon_user_id=?`, uid); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}

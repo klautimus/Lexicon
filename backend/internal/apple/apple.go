@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/auth"
 )
 
 // Config carries runtime knobs supplied by main.go. Apple Music credentials
@@ -69,6 +70,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
+// userIDFromContext extracts the Lexicon user ID from the request context.
+// Falls back to 1 (default admin) when no user is authenticated (desktop app).
+func userIDFromContext(ctx context.Context) int64 {
+	u, ok := auth.UserFromContext(ctx)
+	if !ok || u == nil {
+		return 1
+	}
+	return u.UserID
+}
+
 // -----------------------------------------------------------------------
 // /api/apple/status
 // -----------------------------------------------------------------------
@@ -86,6 +97,7 @@ type statusResponse struct {
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	var resp statusResponse
+	uid := userIDFromContext(r.Context())
 
 	var (
 		teamID, keyID, storefront string
@@ -93,7 +105,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	)
 	err := a.db.QueryRowContext(r.Context(),
 		`SELECT team_id, key_id, storefront, IFNULL(cached_dev_token_expires_at, 0)
-		 FROM apple_music_config WHERE id=1`).Scan(&teamID, &keyID, &storefront, &devTokExp)
+		 FROM apple_music_config WHERE lexicon_user_id=?`, uid).Scan(&teamID, &keyID, &storefront, &devTokExp)
 	switch {
 	case err == nil:
 		resp.Configured = true
@@ -114,7 +126,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		)
 		err := a.db.QueryRowContext(r.Context(),
 			`SELECT storefront, IFNULL(display_name,''), last_synced_at
-			 FROM apple_music_user WHERE id=1`).Scan(&userStorefront, &displayName, &lastSyncedAt)
+			 FROM apple_music_user WHERE lexicon_user_id=?`, uid).Scan(&userStorefront, &displayName, &lastSyncedAt)
 		if err == nil {
 			resp.Connected = true
 			if userStorefront != "" {
@@ -160,11 +172,12 @@ func (a *API) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().Unix()
-	// Upsert single-row id=1
+	uid := userIDFromContext(r.Context())
+	// Upsert by lexicon_user_id
 	_, err := a.db.ExecContext(r.Context(), `
-		INSERT INTO apple_music_config(id, team_id, key_id, private_key, storefront, created_at, updated_at)
-		VALUES(1, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
+		INSERT INTO apple_music_config(id, lexicon_user_id, team_id, key_id, private_key, storefront, created_at, updated_at)
+		VALUES(1, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(lexicon_user_id) DO UPDATE SET
 			team_id=excluded.team_id,
 			key_id=excluded.key_id,
 			private_key=excluded.private_key,
@@ -172,7 +185,7 @@ func (a *API) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			cached_dev_token=NULL,
 			cached_dev_token_expires_at=0,
 			updated_at=excluded.updated_at
-	`, req.TeamID, req.KeyID, req.PrivateKey, req.Storefront, now, now)
+	`, uid, req.TeamID, req.KeyID, req.PrivateKey, req.Storefront, now, now)
 	if err != nil {
 		log.Printf("[apple] save config: %v", err)
 		http.Error(w, "db write failed", 500)
@@ -184,7 +197,7 @@ func (a *API) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	// enabled here because they require a real network call we don't want
 	// to delay the save by; clients call /api/apple/musickit-config next
 	// which exercises the same path).
-	tok, err := MintDeveloperToken(r.Context(), a.db)
+	tok, err := MintDeveloperToken(r.Context(), a.db, uid)
 	if err != nil {
 		log.Printf("[apple] post-save mint: %v", err)
 		http.Error(w, "saved, but could not mint token: "+err.Error(), 500)
@@ -198,10 +211,11 @@ func (a *API) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM apple_music_user WHERE id=1`); err != nil {
+	uid := userIDFromContext(r.Context())
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM apple_music_user WHERE lexicon_user_id=?`, uid); err != nil {
 		log.Printf("[apple] delete user: %v", err)
 	}
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM apple_music_config WHERE id=1`); err != nil {
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM apple_music_config WHERE lexicon_user_id=?`, uid); err != nil {
 		log.Printf("[apple] delete config: %v", err)
 		http.Error(w, "delete failed", 500)
 		return
@@ -220,7 +234,8 @@ type musicKitConfigResponse struct {
 }
 
 func (a *API) handleMusicKitConfig(w http.ResponseWriter, r *http.Request) {
-	tok, err := MintDeveloperToken(r.Context(), a.db)
+	uid := userIDFromContext(r.Context())
+	tok, err := MintDeveloperToken(r.Context(), a.db, uid)
 	if err != nil {
 		if errors.Is(err, ErrNotConfigured) {
 			http.Error(w, "apple music not configured", 400)
@@ -232,7 +247,7 @@ func (a *API) handleMusicKitConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	var storefront string
 	if err := a.db.QueryRowContext(r.Context(),
-		`SELECT storefront FROM apple_music_config WHERE id=1`).Scan(&storefront); err != nil {
+		`SELECT storefront FROM apple_music_config WHERE lexicon_user_id=?`, uid).Scan(&storefront); err != nil {
 		storefront = "us"
 	}
 	writeJSON(w, musicKitConfigResponse{
@@ -251,6 +266,7 @@ type connectRequest struct {
 }
 
 func (a *API) handleConnect(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFromContext(r.Context())
 	var req connectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad json: "+err.Error(), 400)
@@ -262,7 +278,7 @@ func (a *API) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	devTok, err := MintDeveloperToken(r.Context(), a.db)
+	devTok, err := MintDeveloperToken(r.Context(), a.db, uid)
 	if err != nil {
 		http.Error(w, "developer token: "+err.Error(), 500)
 		return
@@ -283,17 +299,17 @@ func (a *API) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// all tracks as new. Only an explicit full re-sync should reset it.
 	var existingLastSyncedAt int64
 	_ = a.db.QueryRowContext(r.Context(),
-		`SELECT last_synced_at FROM apple_music_user WHERE id=1`).Scan(&existingLastSyncedAt)
+		`SELECT last_synced_at FROM apple_music_user WHERE lexicon_user_id=?`, uid).Scan(&existingLastSyncedAt)
 
 	now := time.Now().Unix()
 	_, err = a.db.ExecContext(r.Context(), `
-		INSERT INTO apple_music_user(id, music_user_token, storefront, display_name, last_synced_at, connected_at)
-		VALUES(1, ?, ?, '', ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
+		INSERT INTO apple_music_user(id, lexicon_user_id, music_user_token, storefront, display_name, last_synced_at, connected_at)
+		VALUES(1, ?, ?, ?, '', ?, ?)
+		ON CONFLICT(lexicon_user_id) DO UPDATE SET
 			music_user_token=excluded.music_user_token,
 			storefront=excluded.storefront,
 			connected_at=excluded.connected_at
-	`, req.MusicUserToken, storefront, existingLastSyncedAt, now)
+	`, uid, req.MusicUserToken, storefront, existingLastSyncedAt, now)
 	if err != nil {
 		log.Printf("[apple] connect: store mut: %v", err)
 		http.Error(w, "db write failed", 500)
@@ -313,7 +329,8 @@ func (a *API) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDisconnect(w http.ResponseWriter, r *http.Request) {
-	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM apple_music_user WHERE id=1`); err != nil {
+	uid := userIDFromContext(r.Context())
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM apple_music_user WHERE lexicon_user_id=?`, uid); err != nil {
 		log.Printf("[apple] disconnect: %v", err)
 		http.Error(w, "delete failed", 500)
 		return
@@ -343,12 +360,12 @@ func (a *API) handleManualSync(w http.ResponseWriter, r *http.Request) {
 // CurrentTokens returns a developer token and the user token (if connected).
 // Returns ErrNotConfigured if no creds saved; returns ("", "", nil) with the
 // connected=false signal if creds exist but the user hasn't authorized yet.
-func (a *API) CurrentTokens(ctx context.Context) (devTok, mut string, err error) {
-	devTok, err = MintDeveloperToken(ctx, a.db)
+func (a *API) CurrentTokens(ctx context.Context, userID int64) (devTok, mut string, err error) {
+	devTok, err = MintDeveloperToken(ctx, a.db, userID)
 	if err != nil {
 		return "", "", err
 	}
-	err = a.db.QueryRowContext(ctx, `SELECT music_user_token FROM apple_music_user WHERE id=1`).Scan(&mut)
+	err = a.db.QueryRowContext(ctx, `SELECT music_user_token FROM apple_music_user WHERE lexicon_user_id=?`, userID).Scan(&mut)
 	if errors.Is(err, sql.ErrNoRows) {
 		return devTok, "", nil
 	}

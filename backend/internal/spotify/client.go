@@ -36,8 +36,9 @@ func ensureToken(ctx context.Context, db *sql.DB, clientID, clientSecret string)
 		access, refresh string
 		expiresAt       int64
 	)
+	uid := userIDFromContext(ctx)
 	err := db.QueryRowContext(ctx,
-		`SELECT access_token, refresh_token, expires_at FROM spotify_tokens WHERE id=1`).
+		`SELECT access_token, refresh_token, expires_at FROM spotify_tokens WHERE lexicon_user_id=?`, uid).
 		Scan(&access, &refresh, &expiresAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -65,7 +66,7 @@ func ensureToken(ctx context.Context, db *sql.DB, clientID, clientSecret string)
 		newExpires := time.Now().Unix() + int64(tr.ExpiresIn)
 		_, err = db.ExecContext(ctx, `
 			UPDATE spotify_tokens SET access_token=?, refresh_token=?, expires_at=?, scope=?
-			WHERE id=1`, tr.AccessToken, newRefresh, newExpires, tr.Scope)
+			WHERE lexicon_user_id=?`, tr.AccessToken, newRefresh, newExpires, tr.Scope, uid)
 		if err != nil {
 			return "", err
 		}

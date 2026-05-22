@@ -27,6 +27,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/kevin/lexicon/internal/auth"
 	"github.com/kevin/lexicon/internal/recommender"
 )
 
@@ -36,6 +37,13 @@ import (
 // primary failure detection path.
 //
 //	Summary: 0 Success, 1 Failed. Output dir: ...  (old binary only)
+func getUserID(r *http.Request) int64 {
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		return u.UserID
+	}
+	return 0
+}
+
 var spotiflacSummaryRE = regexp.MustCompile(`Summary:\s*(\d+)\s*Success,\s*(\d+)\s*Failed`)
 
 // spotiflacReportedFailure returns (true, summaryLine) if the job's log shows
@@ -131,6 +139,7 @@ type Job struct {
 	IsSearch   bool     `json:"is_search,omitempty"`   // true when created via /download/search (no Spotify URL)
 	TrackID    int64    `json:"track_id,omitempty"`    // set when search resolves to existing library track
 	Kind       string   `json:"kind,omitempty"`        // "music" (default) or "podcast"; differentiates the source on the Downloads page
+	UserID     int64    `json:"user_id,omitempty"`     // authenticated user who created this job
 	Log        []string `json:"log,omitempty"`
 
 	cmd *exec.Cmd `json:"-"`
@@ -349,6 +358,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 		Status:    StatusQueued,
 		StartedAt: time.Now().Unix(),
 		Kind:      "music",
+		UserID:    getUserID(r),
 		Log:       []string{},
 	}
 	a.mu.Lock()
@@ -365,8 +375,8 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 	// Persist to database
 	if a.db != nil {
 		_, _ = a.db.Exec(
-			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search, kind) VALUES(?, ?, ?, ?, ?, '', 0, ?)`,
-			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind)
+			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search, kind, user_id) VALUES(?, ?, ?, ?, ?, '', 0, ?, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.UserID)
 		a.evictOldJobs()
 	}
 
@@ -473,6 +483,7 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 				IsSearch:   true,
 				TrackID:    trackID,
 				Kind:       "music",
+				UserID:     getUserID(r),
 				Log:        []string{"[search] resolved to existing library track"},
 			}
 			a.mu.Lock()
@@ -489,8 +500,8 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 			// Persist to database
 			if a.db != nil {
 				_, _ = a.db.Exec(
-					`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id, kind) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-					job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID, job.Kind)
+					`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id, kind, user_id) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+					job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID, job.Kind, job.UserID)
 			}
 
 			writeJSON(w, jobSummary(job))
@@ -507,6 +518,7 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 		Log:       []string{},
 		IsSearch:  true,
 		Kind:      "music",
+		UserID:    getUserID(r),
 	}
 	a.mu.Lock()
 	a.jobs[job.ID] = job
@@ -522,8 +534,8 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 	// Persist to database
 	if a.db != nil {
 		_, _ = a.db.Exec(
-			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind) VALUES(?, ?, ?, ?, ?, 1, ?)`,
-			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind)
+			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind, user_id) VALUES(?, ?, ?, ?, ?, 1, ?, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.UserID)
 		a.evictOldJobs()
 	}
 
@@ -550,12 +562,22 @@ func jobFull(j *Job) *Job {
 	return &cp
 }
 
-func (a *API) listJobs(w http.ResponseWriter, _ *http.Request) {
+func (a *API) listJobs(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	uid := getUserID(r)
 	out := make([]*Job, 0, len(a.order))
 	for _, id := range a.order {
-		out = append(out, jobSummary(a.jobs[id]))
+		j := a.jobs[id]
+		if j == nil {
+			continue
+		}
+		// Filter by user: if the job has a UserID set and the request has
+		// an authenticated user, only show matching jobs.
+		if uid > 0 && j.UserID > 0 && j.UserID != uid {
+			continue
+		}
+		out = append(out, jobSummary(j))
 	}
 	writeJSON(w, out)
 }

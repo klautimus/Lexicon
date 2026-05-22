@@ -57,44 +57,68 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	devTok, mut, err := s.api.CurrentTokens(ctx)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT lexicon_user_id FROM apple_music_user WHERE music_user_token IS NOT NULL AND music_user_token != ''`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var userIDs []int64
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			continue
+		}
+		userIDs = append(userIDs, uid)
+	}
+
+	for _, uid := range userIDs {
+		s.syncOneUser(ctx, uid)
+	}
+	return nil
+}
+
+// syncOneUser runs a single sync pass for one Apple Music user.
+func (s *Syncer) syncOneUser(ctx context.Context, uid int64) {
+	devTok, mut, err := s.api.CurrentTokens(ctx, uid)
 	if err != nil {
 		if errors.Is(err, ErrNotConfigured) {
-			return nil
+			return
 		}
-		log.Printf("[apple] sync: token: %v", err)
-		return err
+		log.Printf("[apple] sync user %d: token: %v", uid, err)
+		return
 	}
 	if mut == "" {
 		// Not connected yet — silent no-op.
-		return nil
+		return
 	}
 
 	var lastSyncedAt int64
 	var storefront string
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT last_synced_at, storefront FROM apple_music_user WHERE id=1`).Scan(&lastSyncedAt, &storefront); err != nil {
-		return nil
+		`SELECT last_synced_at, storefront FROM apple_music_user WHERE lexicon_user_id=?`, uid).Scan(&lastSyncedAt, &storefront); err != nil {
+		return
 	}
 	if storefront == "" {
 		storefront = "us"
 	}
 	if lastSyncedAt > 0 && time.Now().Unix()-lastSyncedAt < int64(minSyncGap.Seconds()) {
-		return nil
+		return
 	}
 
 	rp, err := FetchRecentlyPlayed(ctx, devTok, mut, 30)
 	if err != nil {
 		if errors.Is(err, ErrUnauthorized) {
-			log.Printf("[apple] sync: MUT rejected by Apple — user must re-authorize")
+			log.Printf("[apple] sync user %d: MUT rejected by Apple — user must re-authorize", uid)
 		} else {
-			log.Printf("[apple] sync: recently-played: %v", err)
+			log.Printf("[apple] sync user %d: recently-played: %v", uid, err)
 		}
-		return err
+		return
 	}
 	if len(rp.Data) == 0 {
-		_, _ = s.db.ExecContext(ctx, `UPDATE apple_music_user SET last_synced_at=? WHERE id=1`, time.Now().Unix())
-		return nil
+		_, _ = s.db.ExecContext(ctx, `UPDATE apple_music_user SET last_synced_at=? WHERE lexicon_user_id=?`, time.Now().Unix(), uid)
+		return
 	}
 
 	// Apple does not provide play timestamps on /me/recent/played/tracks —
@@ -123,11 +147,10 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 		imported++
 	}
 
-	_, _ = s.db.ExecContext(ctx, `UPDATE apple_music_user SET last_synced_at=? WHERE id=1`, time.Now().Unix())
+	_, _ = s.db.ExecContext(ctx, `UPDATE apple_music_user SET last_synced_at=? WHERE lexicon_user_id=?`, time.Now().Unix(), uid)
 	if imported > 0 {
-		log.Printf("[apple] synced %d play(s)", imported)
+		log.Printf("[apple] user %d: synced %d play(s)", uid, imported)
 	}
-	return nil
 }
 
 // ingest upserts a track row (by apple_id) and records a play entry.
@@ -163,10 +186,10 @@ func (s *Syncer) ingest(ctx context.Context, song SongResource, startedAt int64)
 		res, err := s.db.ExecContext(ctx, `
 			INSERT INTO tracks(path, title, artist, album_artist, album, year, genre,
 			                  duration_sec, mime, media_kind, size_bytes, cover_path,
-			                  added_at, apple_id, external_url)
-			VALUES('apple:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', 0, '', ?, ?, ?)
+			                  added_at, apple_id, external_url, user_id)
+			VALUES('apple:' || ?, ?, ?, ?, ?, ?, ?, ?, '', 'music', 0, '', ?, ?, ?, ?)
 		`, canonicalID, attr.Name, attr.ArtistName, attr.ArtistName, attr.AlbumName,
-			year, genre, durSec, now, canonicalID, attr.URL)
+			year, genre, durSec, now, canonicalID, attr.URL, nil)
 		if err != nil {
 			return fmt.Errorf("insert track: %w", err)
 		}
@@ -194,9 +217,9 @@ func (s *Syncer) ingest(ctx context.Context, song SongResource, startedAt int64)
 		return nil
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO plays(track_id, started_at, duration_played_sec, completed, source)
-		 VALUES(?, ?, ?, 1, 'apple')`,
-		trackID, startedAt, durSec)
+		`INSERT INTO plays(track_id, started_at, duration_played_sec, completed, source, user_id)
+		 VALUES(?, ?, ?, 1, 'apple', ?)`,
+		trackID, startedAt, durSec, nil)
 	return err
 }
 

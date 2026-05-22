@@ -60,7 +60,7 @@ type jwtClaims struct {
 // the cached token in apple_music_config if it has more than
 // devTokenRefreshWindow remaining; otherwise it mints, caches, and returns
 // a fresh token. Returns ErrNotConfigured if credentials are not yet saved.
-func MintDeveloperToken(ctx context.Context, db *sql.DB) (string, error) {
+func MintDeveloperToken(ctx context.Context, db *sql.DB, userID int64) (string, error) {
 	tokenMintMu.Lock()
 	defer tokenMintMu.Unlock()
 
@@ -71,7 +71,7 @@ func MintDeveloperToken(ctx context.Context, db *sql.DB) (string, error) {
 	row := db.QueryRowContext(ctx, `
 		SELECT team_id, key_id, private_key,
 		       IFNULL(cached_dev_token,''), IFNULL(cached_dev_token_expires_at, 0)
-		FROM apple_music_config WHERE id=1`)
+		FROM apple_music_config WHERE lexicon_user_id=?`, userID)
 	if err := row.Scan(&teamID, &keyID, &privateKey, &cached, &expiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", ErrNotConfigured
@@ -89,8 +89,8 @@ func MintDeveloperToken(ctx context.Context, db *sql.DB) (string, error) {
 		return "", err
 	}
 	if _, err := db.ExecContext(ctx,
-		`UPDATE apple_music_config SET cached_dev_token=?, cached_dev_token_expires_at=?, updated_at=? WHERE id=1`,
-		tok, exp, time.Now().Unix()); err != nil {
+		`UPDATE apple_music_config SET cached_dev_token=?, cached_dev_token_expires_at=?, updated_at=? WHERE lexicon_user_id=?`,
+		tok, exp, time.Now().Unix(), userID); err != nil {
 		return "", fmt.Errorf("cache dev token: %w", err)
 	}
 	return tok, nil

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/kevin/lexicon/internal/auth"
 )
 
 type verifierEntry struct {
@@ -97,6 +98,16 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 
 func (a *API) configured() bool {
 	return a.cfg.ClientID != ""
+}
+
+// userIDFromContext extracts the Lexicon user ID from the request context.
+// Falls back to 1 (default admin) when no user is authenticated (desktop app).
+func userIDFromContext(ctx context.Context) int64 {
+	u, ok := auth.UserFromContext(ctx)
+	if !ok || u == nil {
+		return 1
+	}
+	return u.UserID
 }
 
 func (a *API) devices(w http.ResponseWriter, r *http.Request) {

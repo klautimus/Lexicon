@@ -34,6 +34,9 @@ const (
 	MsgState     = "state"
 	MsgDevices   = "devices"
 	MsgRegister  = "register"
+	MsgPromoted  = "promoted"
+	MsgDemoted   = "demoted"
+	MsgError     = "error"
 )
 
 type Message struct {
@@ -47,7 +50,11 @@ type Message struct {
 	Tracks    json.RawMessage `json:"tracks,omitempty"`
 	StartIdx  int             `json:"start_index,omitempty"`
 	Track     json.RawMessage `json:"track,omitempty"`
-	Devices   json.RawMessage `json:"devices,omitempty"`
+	// Queue and CurrentTrack match the frontend's transfer message fields
+	// (DevicePicker sends {queue, currentTrack, position} on transfer).
+	Queue        json.RawMessage `json:"queue,omitempty"`
+	CurrentTrack json.RawMessage `json:"currentTrack,omitempty"`
+	Devices      json.RawMessage `json:"devices,omitempty"`
 }
 
 type Client struct {
@@ -66,6 +73,7 @@ type Hub struct {
 	broadcast  chan []byte
 	done       chan struct{}
 	mu         sync.RWMutex
+	lastState  []byte
 }
 
 type clientMsg struct {
@@ -120,6 +128,11 @@ func (h *Hub) Run() {
 			h.broadcastDevices()
 
 		case message := <-h.broadcast:
+			// Capture state messages for transfer continuity
+			var peek Message
+			if err := json.Unmarshal(message, &peek); err == nil && peek.Type == MsgState {
+				h.lastState = message
+			}
 			h.mu.RLock()
 			for _, client := range h.clients {
 				select {
@@ -163,6 +176,104 @@ func (h *Hub) broadcastDevices() {
 	h.mu.RUnlock()
 }
 
+// handleTransfer reassigns the player role from the current player to the target device.
+// The requesting client must be the current player (or any controller if no player exists).
+// queue, currentTrack, and position carry the full playback state from the initiator
+// so the new player can resume seamlessly.
+// Edge cases handled: target not found (error sent to requester), no current player
+// (target promoted directly), self-transfer (no-op).
+func (h *Hub) handleTransfer(source *Client, targetID string, queue json.RawMessage, currentTrack json.RawMessage, position float64) {
+	h.mu.Lock()
+
+	// Validate target exists
+	target, ok := h.clients[targetID]
+	if !ok {
+		h.mu.Unlock()
+		errMsg, _ := json.Marshal(Message{
+			Type:  MsgError,
+			Track: mustJSON(map[string]string{"message": "target device not found"}),
+		})
+		select {
+		case source.send <- errMsg:
+		default:
+		}
+		return
+	}
+
+	// Find current player
+	var currentPlayer *Client
+	for _, c := range h.clients {
+		if c.role == "player" {
+			currentPlayer = c
+			break
+		}
+	}
+
+	// Self-transfer — target is already the player
+	if currentPlayer != nil && currentPlayer.deviceID == targetID {
+		h.mu.Unlock()
+		return
+	}
+
+	// Demote current player if one exists
+	if currentPlayer != nil {
+		currentPlayer.role = "controller"
+	}
+
+	// Promote target
+	target.role = "player"
+
+	// Build promoted message.
+	// Prefer the explicit queue + currentTrack from the transfer message.
+	// Fall back to lastState if the transfer initiator didn't send queue data.
+	var promotedMsg []byte
+	if queue != nil {
+		promotedMsg, _ = json.Marshal(Message{
+			Type:         MsgPromoted,
+			Queue:        queue,
+			CurrentTrack: currentTrack,
+			Position:     position,
+		})
+	} else if h.lastState != nil {
+		var lastState Message
+		if err := json.Unmarshal(h.lastState, &lastState); err == nil {
+			promotedMsg, _ = json.Marshal(Message{
+				Type:     MsgPromoted,
+				Playing:  lastState.Playing,
+				Position: lastState.Position,
+				Duration: lastState.Duration,
+				Track:    lastState.Track,
+				Tracks:   lastState.Tracks,
+				StartIdx: lastState.StartIdx,
+			})
+		}
+	}
+	if promotedMsg == nil {
+		promotedMsg, _ = json.Marshal(Message{Type: MsgPromoted})
+	}
+
+	h.mu.Unlock()
+
+	// Send promoted to new player
+	select {
+	case target.send <- promotedMsg:
+	default:
+	}
+
+	// Send demoted to old player
+	if currentPlayer != nil {
+		demotedMsg, _ := json.Marshal(Message{Type: MsgDemoted})
+		select {
+		case currentPlayer.send <- demotedMsg:
+		default:
+		}
+	}
+
+	log.Printf("[playerws] transfer: %s → %s (player role)", source.deviceID, targetID)
+	h.broadcastDevices()
+}
+
+// ServeHTTP handles WebSocket upgrade requests.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	deviceID := r.URL.Query().Get("deviceID")
 	if deviceID == "" {
@@ -222,6 +333,14 @@ func (c *Client) readPump() {
 
 		var msg Message
 		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+
+		// Transfer is handled by the hub (role reassignment with validation).
+		// Pass queue + currentTrack + position so the promoted message carries
+		// the full playback state for continuity on the new player.
+		if msg.Type == MsgTransfer && msg.Target != "" {
+			c.hub.handleTransfer(c, msg.Target, msg.Queue, msg.CurrentTrack, msg.Position)
 			continue
 		}
 
