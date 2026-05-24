@@ -1,42 +1,84 @@
-import { useState, useEffect, useRef } from "react";
-import { Play, MoreHorizontal, Plus, ListMusic, Trash2, Download } from "lucide-react";
+import { useState, useEffect, useRef, useCallback, memo } from "react";
+import { Play, MoreHorizontal, Plus, ListMusic, Trash2, Download, ListPlus } from "lucide-react";
 import { api, Track, Playlist } from "../lib/api";
 import { usePlayer } from "../player/PlayerContext";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { useToast } from "../contexts/ToastContext";
 
-export default function TrackList({ tracks, onDelete }: { tracks: Track[]; onDelete?: (trackId: number) => void }) {
+type SortField = "title" | "artist" | "album" | "duration";
+type SortDir = "asc" | "desc";
+
+interface TrackListProps {
+  tracks: Track[];
+  onDelete?: (trackId: number) => void;
+  sortField?: SortField | null;
+  sortDir?: SortDir;
+  onSort?: (field: SortField) => void;
+  player?: ReturnType<typeof usePlayer>;
+}
+
+// Module-level playlist cache to avoid redundant API calls when
+// multiple TrackRow menus are opened (30s TTL).
+let playlistCache: { data: Playlist[]; ts: number } | null = null;
+async function getCachedPlaylists(): Promise<Playlist[]> {
+  if (playlistCache && Date.now() - playlistCache.ts < 30_000) {
+    return playlistCache.data;
+  }
+  const data = await api.playlists();
+  playlistCache = { data, ts: Date.now() };
+  return data;
+}
+
+export default function TrackList({ tracks, onDelete, sortField, sortDir, onSort, player }: TrackListProps) {
   const isMobile = useIsMobile();
   if (isMobile) {
-    return <MobileCardList tracks={tracks} onDelete={onDelete} />;
+    return <MobileCardList tracks={tracks} onDelete={onDelete} sortField={sortField} sortDir={sortDir} onSort={onSort} player={player} />;
   }
-  return <DesktopTable tracks={tracks} onDelete={onDelete} />;
+  return <DesktopTable tracks={tracks} onDelete={onDelete} sortField={sortField} sortDir={sortDir} onSort={onSort} player={player} />;
+}
+
+function SortHeader({ field, label, sortField, sortDir, onSort }: {
+  field: SortField; label: string; sortField: SortField | null | undefined;
+  sortDir: SortDir | undefined; onSort?: (f: SortField) => void;
+}) {
+  const ariaSort = sortField !== field ? "none" : sortDir === "asc" ? "ascending" : "descending";
+  return (
+    <th
+      className="text-left px-4 py-2 cursor-pointer select-none hover:text-text"
+      onClick={() => onSort?.(field)}
+      aria-sort={ariaSort}
+    >
+      {label} {sortField === field ? (sortDir === "asc" ? "↑" : "↓") : ""}
+    </th>
+  );
 }
 
 /* ------------------------------------------------------------------ */
 /*  Desktop Table                                                       */
 /* ------------------------------------------------------------------ */
 
-function DesktopTable({ tracks, onDelete }: { tracks: Track[]; onDelete?: (trackId: number) => void }) {
+function DesktopTable({ tracks, onDelete, sortField, sortDir, onSort, player }: TrackListProps) {
   return (
     <div className="rounded-lg border border-panel2">
       <table className="w-full text-sm">
-        <thead className="bg-panel2/60 text-muted">
+        <caption className="sr-only">Track list</caption>
+        <thead className="bg-panel2/60 text-muted sticky top-0">
           <tr>
             <th className="text-left px-4 py-2 w-10">#</th>
-            <th className="text-left px-4 py-2">Title</th>
-            <th className="text-left px-4 py-2">Artist</th>
-            <th className="text-left px-4 py-2 max-w-48">Album</th>
+            <SortHeader field="title" label="Title" sortField={sortField} sortDir={sortDir} onSort={onSort} />
+            <SortHeader field="artist" label="Artist" sortField={sortField} sortDir={sortDir} onSort={onSort} />
+            <SortHeader field="album" label="Album" sortField={sortField} sortDir={sortDir} onSort={onSort} />
+            <SortHeader field="duration" label="Duration" sortField={sortField} sortDir={sortDir} onSort={onSort} />
             <th className="text-left px-4 py-2 w-10"></th>
           </tr>
         </thead>
         <tbody>
           {tracks.map((t, i) => (
-            <TrackRow key={`${t.id}-${i}`} track={t} index={i} tracks={tracks} onDelete={onDelete} />
+            <TrackRow key={t.id} track={t} index={i} tracks={tracks} onDelete={onDelete} player={player} />
           ))}
           {tracks.length === 0 && (
             <tr>
-              <td colSpan={5} className="px-4 py-8 text-center text-muted">
+              <td colSpan={6} className="px-4 py-8 text-center text-muted">
                 No tracks.
               </td>
             </tr>
@@ -47,18 +89,27 @@ function DesktopTable({ tracks, onDelete }: { tracks: Track[]; onDelete?: (track
   );
 }
 
-function TrackRow({
+function formatDuration(sec: number): string {
+  if (!sec || sec <= 0) return "—";
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+const TrackRow = memo(function TrackRow({
   track,
   index,
   tracks,
   onDelete,
+  player,
 }: {
   track: Track;
   index: number;
   tracks: Track[];
   onDelete?: (trackId: number) => void;
+  player?: ReturnType<typeof usePlayer>;
 }) {
-  const p = usePlayer();
+  const p = player ?? usePlayer();
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -70,6 +121,8 @@ function TrackRow({
   const [deleteError, setDeleteError] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
+  const isPlaying = p.current?.id === track.id;
+
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) {
@@ -80,24 +133,24 @@ function TrackRow({
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  async function loadPlaylists() {
+  const loadPlaylists = useCallback(async () => {
     try {
-      const data = await api.playlists();
+      const data = await getCachedPlaylists();
       setPlaylists(data);
     } catch {
       // ignore
     }
-  }
+  }, []);
 
-  function toggle() {
+  const toggle = useCallback(() => {
     if (!open) loadPlaylists();
-    setOpen(!open);
+    setOpen((v) => !v);
     setAddedMsg("");
     setConfirmingDelete(false);
     setDeleteError("");
-  }
+  }, [open, loadPlaylists]);
 
-  async function addToPlaylist(playlistId: number, playlistName: string) {
+  const addToPlaylist = useCallback(async (playlistId: number, playlistName: string) => {
     try {
       await api.addToPlaylist(playlistId, track.id);
       setAddedMsg(`Added to "${playlistName}"`);
@@ -105,14 +158,15 @@ function TrackRow({
     } catch {
       setAddedMsg("Failed to add");
     }
-  }
+  }, [track.id]);
 
-  async function createPlaylist(e: React.FormEvent) {
+  const createPlaylist = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
     try {
       const pl = await api.createPlaylist(newName.trim());
       await api.addToPlaylist(pl.id, track.id);
+      playlistCache = null; // invalidate so next load fetches fresh data
       setNewName("");
       setCreating(false);
       setAddedMsg(`Added to "${pl.name}"`);
@@ -121,9 +175,9 @@ function TrackRow({
     } catch {
       setAddedMsg("Failed to create");
     }
-  }
+  }, [newName, track.id, loadPlaylists]);
 
-  async function handleDelete() {
+  const handleDelete = useCallback(async () => {
     setDeleting(true);
     setDeleteError("");
     try {
@@ -131,40 +185,49 @@ function TrackRow({
       setOpen(false);
       setConfirmingDelete(false);
       onDelete?.(track.id);
-    } catch {
+    } catch (e) {
+      console.error(`[TrackRow] delete failed for track ${track.id}:`, e);
       setDeleteError("Failed to delete");
     } finally {
       setDeleting(false);
     }
-  }
+  }, [track.id, onDelete]);
 
-  async function handleUpgrade() {
+  const handleUpgrade = useCallback(async () => {
     try {
       const result = await api.upgradeTrack(track.id);
       toast.info(`Upgrading "${track.title}" — ${result.message || "queued"}`);
     } catch {
       toast.error(`Failed to upgrade "${track.title}"`);
     }
-  }
+  }, [track.id, track.title, toast]);
+
+  const handleAddToQueue = useCallback(() => {
+    p.addToQueue?.(track);
+    setOpen(false);
+    toast.info(`Added "${track.title}" to queue`);
+  }, [p, track, toast]);
 
   return (
     <tr
       onDoubleClick={() => p.play(tracks, index)}
-      className="border-t border-panel2 hover:bg-panel2/40 cursor-pointer group"
+      className={`border-t border-panel2 hover:bg-panel2/50 cursor-pointer group${isPlaying ? " bg-accent/10" : ""}`}
     >
       <td className="px-4 py-2 text-muted">
         <button
           onClick={() => p.play(tracks, index)}
-          className="opacity-0 group-hover:opacity-100 hover:text-accent"
+          className={isPlaying ? "text-accent" : "opacity-0 group-hover:opacity-100 hover:text-accent"}
           aria-label={`Play ${track.title}`}
         >
           <Play size={14} />
         </button>
-        <span className="group-hover:hidden">{index + 1}</span>
+        <span className={isPlaying ? "hidden" : "group-hover:hidden"}>{index + 1}</span>
+        {isPlaying && <span className="text-accent text-xs">▶</span>}
       </td>
       <td className="px-4 py-2 truncate">{track.title}</td>
       <td className="px-4 py-2 text-muted truncate">{track.artist}</td>
       <td className="px-4 py-2 text-muted truncate max-w-48" title={track.album}>{track.album}</td>
+      <td className="px-4 py-2 text-muted tabular-nums">{formatDuration(track.duration_sec)}</td>
       <td className="px-4 py-2 relative">
         <div ref={ref}>
           <button
@@ -180,9 +243,7 @@ function TrackRow({
           {open && (
             <div className="absolute right-0 top-full z-20 mt-1 w-56 bg-panel border border-panel2 rounded-lg shadow-lg py-1 max-h-72 overflow-y-auto">
               {addedMsg ? (
-                <div className="px-3 py-2 text-sm text-green-400">
-                  {addedMsg}
-                </div>
+                <div className="px-3 py-2 text-sm text-green-400">{addedMsg}</div>
               ) : deleteError ? (
                 <div className="px-3 py-2 text-sm text-red-400">{deleteError}</div>
               ) : confirmingDelete ? (
@@ -274,6 +335,18 @@ function TrackRow({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        handleAddToQueue();
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-blue-400"
+                    >
+                      <ListPlus size={14} />
+                      Add to Queue
+                    </button>
+                  </div>
+                  <div className="border-t border-panel2 mt-1 pt-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setOpen(false);
                         handleUpgrade();
                       }}
@@ -303,37 +376,39 @@ function TrackRow({
       </td>
     </tr>
   );
-}
+});
 
 /* ------------------------------------------------------------------ */
 /*  Mobile Card List                                                    */
 /* ------------------------------------------------------------------ */
 
-function MobileCardList({ tracks, onDelete }: { tracks: Track[]; onDelete?: (trackId: number) => void }) {
+function MobileCardList({ tracks, onDelete, sortField, sortDir, onSort, player }: TrackListProps) {
   if (tracks.length === 0) {
     return <p className="text-muted text-center py-8">No tracks.</p>;
   }
   return (
     <div className="space-y-2">
       {tracks.map((t, i) => (
-        <MobileTrackCard key={`${t.id}-${i}`} track={t} index={i} tracks={tracks} onDelete={onDelete} />
+        <MobileTrackCard key={t.id} track={t} index={i} tracks={tracks} onDelete={onDelete} player={player} />
       ))}
     </div>
   );
 }
 
-function MobileTrackCard({
+const MobileTrackCard = memo(function MobileTrackCard({
   track,
   index,
   tracks,
   onDelete,
+  player,
 }: {
   track: Track;
   index: number;
   tracks: Track[];
   onDelete?: (trackId: number) => void;
+  player?: ReturnType<typeof usePlayer>;
 }) {
-  const p = usePlayer();
+  const p = player ?? usePlayer();
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -345,6 +420,8 @@ function MobileTrackCard({
   const [deleteError, setDeleteError] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
+  const isPlaying = p.current?.id === track.id;
+
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) {
@@ -355,25 +432,25 @@ function MobileTrackCard({
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  async function loadPlaylists() {
+  const loadPlaylists = useCallback(async () => {
     try {
-      const data = await api.playlists();
+      const data = await getCachedPlaylists();
       setPlaylists(data);
     } catch {
       // ignore
     }
-  }
+  }, []);
 
-  function toggle(e: React.MouseEvent) {
+  const toggle = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (!open) loadPlaylists();
-    setOpen(!open);
+    setOpen((v) => !v);
     setAddedMsg("");
     setConfirmingDelete(false);
     setDeleteError("");
-  }
+  }, [open, loadPlaylists]);
 
-  async function addToPlaylist(playlistId: number, playlistName: string) {
+  const addToPlaylist = useCallback(async (playlistId: number, playlistName: string) => {
     try {
       await api.addToPlaylist(playlistId, track.id);
       setAddedMsg(`Added to "${playlistName}"`);
@@ -381,14 +458,15 @@ function MobileTrackCard({
     } catch {
       setAddedMsg("Failed to add");
     }
-  }
+  }, [track.id]);
 
-  async function createPlaylist(e: React.FormEvent) {
+  const createPlaylist = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
     try {
       const pl = await api.createPlaylist(newName.trim());
       await api.addToPlaylist(pl.id, track.id);
+      playlistCache = null; // invalidate so next load fetches fresh data
       setNewName("");
       setCreating(false);
       setAddedMsg(`Added to "${pl.name}"`);
@@ -397,9 +475,9 @@ function MobileTrackCard({
     } catch {
       setAddedMsg("Failed to create");
     }
-  }
+  }, [newName, track.id, loadPlaylists]);
 
-  async function handleDelete() {
+  const handleDelete = useCallback(async () => {
     setDeleting(true);
     setDeleteError("");
     try {
@@ -407,25 +485,32 @@ function MobileTrackCard({
       setOpen(false);
       setConfirmingDelete(false);
       onDelete?.(track.id);
-    } catch {
+    } catch (e) {
+      console.error(`[MobileTrackCard] delete failed for track ${track.id}:`, e);
       setDeleteError("Failed to delete");
     } finally {
       setDeleting(false);
     }
-  }
+  }, [track.id, onDelete]);
 
-  async function handleUpgrade() {
+  const handleUpgrade = useCallback(async () => {
     try {
       const result = await api.upgradeTrack(track.id);
       toast.info(`Upgrading "${track.title}" — ${result.message || "queued"}`);
     } catch {
       toast.error(`Failed to upgrade "${track.title}"`);
     }
-  }
+  }, [track.id, track.title, toast]);
+
+  const handleAddToQueue = useCallback(() => {
+    p.addToQueue?.(track);
+    setOpen(false);
+    toast.info(`Added "${track.title}" to queue`);
+  }, [p, track, toast]);
 
   return (
     <div
-      className="bg-panel border border-panel2 rounded-lg p-3 flex items-center gap-3 active:bg-panel2/50 transition-colors relative"
+      className={`bg-panel border border-panel2 rounded-lg p-3 flex items-center gap-3 active:bg-panel2/50 transition-colors relative${isPlaying ? " ring-1 ring-accent/50" : ""}`}
       onClick={() => p.play(tracks, index)}
     >
       <img
@@ -435,7 +520,7 @@ function MobileTrackCard({
         onError={(e) => ((e.target as HTMLImageElement).style.opacity = "0")}
       />
       <div className="flex-1 min-w-0">
-        <div className="truncate text-sm font-medium">{track.title}</div>
+        <div className={`truncate text-sm font-medium${isPlaying ? " text-accent" : ""}`}>{track.title}</div>
         <div className="truncate text-xs text-muted">
           {track.artist} {track.album && `— ${track.album}`}
         </div>
@@ -447,20 +532,21 @@ function MobileTrackCard({
             e.stopPropagation();
             p.play(tracks, index);
           }}
-          className="w-9 h-9 rounded-full bg-accent text-bg flex items-center justify-center"
+          className="w-11 h-11 rounded-full bg-accent text-bg flex items-center justify-center"
+          aria-label={`Play ${track.title}`}
         >
-          <Play size={14} className="ml-0.5" />
+          <Play size={16} className="ml-0.5" />
         </button>
         <button
           onClick={toggle}
-          className="w-9 h-9 flex items-center justify-center text-muted"
+          className="w-11 h-11 flex items-center justify-center text-muted"
           aria-label="Track actions menu"
         >
-          <MoreHorizontal size={18} />
+          <MoreHorizontal size={20} />
         </button>
 
         {open && (
-          <div className="absolute right-2 top-12 z-20 w-56 bg-panel border border-panel2 rounded-lg shadow-lg py-1 max-h-72 overflow-y-auto">
+          <div className="absolute right-2 top-14 z-20 w-56 bg-panel border border-panel2 rounded-lg shadow-lg py-1 max-h-72 overflow-y-auto">
             {addedMsg ? (
               <div className="px-3 py-2 text-sm text-green-400">{addedMsg}</div>
             ) : deleteError ? (
@@ -536,43 +622,55 @@ function MobileTrackCard({
                     </button>
                   ))
                 )}
-                  <div className="border-t border-panel2 mt-1 pt-1">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCreating(true);
-                      }}
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-accent"
-                    >
-                      <Plus size={14} />
-                      Create new playlist...
-                    </button>
-                  </div>
-                  <div className="border-t border-panel2 mt-1 pt-1">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpen(false);
-                        handleUpgrade();
-                      }}
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-yellow-400"
-                    >
-                      <Download size={14} />
-                      Upgrade Quality
-                    </button>
-                  </div>
-                  <div className="border-t border-panel2 mt-1 pt-1">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setConfirmingDelete(true);
-                      }}
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-red-400"
-                    >
-                      <Trash2 size={14} />
-                      Delete
-                    </button>
-                  </div>
+                <div className="border-t border-panel2 mt-1 pt-1">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCreating(true);
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-accent"
+                  >
+                    <Plus size={14} />
+                    Create new playlist...
+                  </button>
+                </div>
+                <div className="border-t border-panel2 mt-1 pt-1">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleAddToQueue();
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-blue-400"
+                  >
+                    <ListPlus size={14} />
+                    Add to Queue
+                  </button>
+                </div>
+                <div className="border-t border-panel2 mt-1 pt-1">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpen(false);
+                      handleUpgrade();
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-yellow-400"
+                  >
+                    <Download size={14} />
+                    Upgrade Quality
+                  </button>
+                </div>
+                <div className="border-t border-panel2 mt-1 pt-1">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmingDelete(true);
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2 text-red-400"
+                  >
+                    <Trash2 size={14} />
+                    Delete
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -580,5 +678,4 @@ function MobileTrackCard({
       </div>
     </div>
   );
-}
-
+});

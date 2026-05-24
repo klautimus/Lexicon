@@ -1,10 +1,10 @@
-import { useState, useRef, type FormEvent } from "react";
+import { useState, useRef, useEffect, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Loader2, Music } from "lucide-react";
 import { useUser } from "../contexts/UserContext";
 
 export default function LoginPage() {
-  const { login } = useUser();
+  const { login, user, loading: sessionLoading } = useUser();
   const navigate = useNavigate();
   const usernameRef = useRef<HTMLInputElement>(null);
 
@@ -14,6 +14,20 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // M4: Redirect to / if already authenticated
+  useEffect(() => {
+    if (!sessionLoading && user) {
+      navigate("/", { replace: true });
+    }
+  }, [sessionLoading, user, navigate]);
+
+  // B3 fix: Use usernameRef for focus management on error
+  useEffect(() => {
+    if (error && usernameRef.current) {
+      usernameRef.current.focus();
+    }
+  }, [error]);
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const u = username.trim();
@@ -21,6 +35,8 @@ export default function LoginPage() {
       setError("Please enter both username and password.");
       return;
     }
+    // B1 fix: Guard against rapid submit — disable immediately
+    if (submitting) return;
     setError("");
     setSubmitting(true);
     try {
@@ -35,9 +51,20 @@ export default function LoginPage() {
       } else {
         setError(msg.length < 120 ? msg : "Login failed. Please try again.");
       }
+      // P4 fix: Clear password on failed login
+      setPassword("");
     } finally {
       setSubmitting(false);
     }
+  }
+
+  // Show loading spinner while checking session
+  if (sessionLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-bg px-4">
+        <Loader2 size={24} className="animate-spin text-muted" />
+      </div>
+    );
   }
 
   return (
@@ -56,6 +83,8 @@ export default function LoginPage() {
         <form
           onSubmit={handleSubmit}
           className="bg-panel border border-panel2 rounded-xl p-6 space-y-4"
+          aria-label="Sign in to Lexicon"
+          name="login"
         >
           {/* Username */}
           <div>
@@ -69,9 +98,11 @@ export default function LoginPage() {
               autoFocus
               autoComplete="username"
               value={username}
-              onChange={(e) => { setUsername(e.target.value); setError(""); }}
+              onChange={(e) => setUsername(e.target.value)}
               className="w-full bg-bg border border-panel2 rounded-md px-3 py-2 text-sm text-text placeholder:text-muted/50 focus:outline-none focus:border-accent/40 transition-colors"
               placeholder="Enter username"
+              aria-required="true"
+              aria-describedby={error ? "login-error" : undefined}
             />
           </div>
 
@@ -86,9 +117,11 @@ export default function LoginPage() {
                 type={showPassword ? "text" : "password"}
                 autoComplete="current-password"
                 value={password}
-                onChange={(e) => { setPassword(e.target.value); setError(""); }}
+                onChange={(e) => setPassword(e.target.value)}
                 className="w-full bg-bg border border-panel2 rounded-md px-3 py-2 pr-9 text-sm text-text placeholder:text-muted/50 focus:outline-none focus:border-accent/40 transition-colors"
                 placeholder="Enter password"
+                aria-required="true"
+                aria-describedby={error ? "login-error" : undefined}
               />
               <button
                 type="button"
@@ -96,15 +129,21 @@ export default function LoginPage() {
                 className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted hover:text-text transition-colors"
                 tabIndex={-1}
                 aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
             </div>
           </div>
 
-          {/* Error */}
+          {/* Error — V1 fix: proper spacing with mt, A2/A3 fix: role="alert" + aria-live */}
           {error && (
-            <p className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 rounded-md px-3 py-2">
+            <p
+              id="login-error"
+              className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 rounded-md px-3 py-2 mt-2"
+              role="alert"
+              aria-live="polite"
+            >
               {error}
             </p>
           )}

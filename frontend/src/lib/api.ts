@@ -77,8 +77,8 @@ export const api = {
   health: () => j<{ ok: boolean }>("/health"),
   scan: () => j<{ started: boolean }>("/scan", { method: "POST" }),
   stats: () => j<Stats>("/library/stats"),
-  tracks: (kind?: string, limit = 200, offset = 0) =>
-    j<TrackListResponse>(`/library/tracks?limit=${limit}&offset=${offset}${kind ? `&kind=${kind}` : ""}`),
+  tracks: (kind?: string, limit = 200, offset = 0, signal?: AbortSignal) =>
+    j<TrackListResponse>(`/library/tracks?limit=${limit}&offset=${offset}${kind ? `&kind=${kind}` : ""}`, signal ? { signal } : undefined),
   albums: () => j<Album[]>("/library/albums"),
   artists: () => j<Artist[]>("/library/artists"),
   podcasts: () => j<Podcast[]>("/library/podcasts"),
@@ -172,14 +172,22 @@ export const api = {
   createPlaylist: (name: string) =>
     j<Playlist>('/playlists', { method: 'POST', body: JSON.stringify({ name }) }),
   playlist: (id: number) => j<PlaylistWithTracks>(`/playlists/${id}`),
-  updatePlaylist: (id: number, name: string) =>
-    j<{ ok: boolean }>(`/playlists/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
+  updatePlaylist: (id: number, name: string, description?: string, cover_art_path?: string) =>
+    j<{ ok: boolean }>(`/playlists/${id}`, { 
+      method: 'PUT', 
+      body: JSON.stringify({ name, description: description ?? "", cover_art_path: cover_art_path ?? "" }) 
+    }),
   deletePlaylist: (id: number) =>
     j<void>(`/playlists/${id}`, { method: 'DELETE' }),
   addToPlaylist: (playlistId: number, trackId: number) =>
     j<{ ok: boolean }>(`/playlists/${playlistId}/tracks`, { method: 'POST', body: JSON.stringify({ track_id: trackId }) }),
   removeFromPlaylist: (playlistId: number, position: number) =>
     j<void>(`/playlists/${playlistId}/tracks/${position}`, { method: 'DELETE' }),
+  reorderPlaylist: (playlistId: number, fromPosition: number, toPosition: number) =>
+    j<{ ok: boolean }>(`/playlists/${playlistId}/tracks/reorder`, {
+      method: 'PUT',
+      body: JSON.stringify({ from_position: fromPosition, to_position: toPosition }),
+    }),
   deleteTrack: (trackId: number) =>
     j<void>(`/library/track/${trackId}`, { method: 'DELETE' }),
 
@@ -214,6 +222,11 @@ export const api = {
       body: JSON.stringify({ position_sec: positionSec, completed }),
     }),
   podcastStatus: () => j<{ available: boolean; bin?: string }>('/podcasts/status'),
+  updatePodcastFeed: (id: number, data: { auto_download?: boolean }) =>
+    j<{ ok: boolean }>(`/podcasts/feeds/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
 
   // Spotify devices
   spotifyDevices: () => j<SpotifyDevice[]>('/spotify/devices'),
@@ -259,10 +272,13 @@ export interface DownloadJob {
   progress?: number; // 0-100 download percentage
   progress_label?: string; // e.g. "1/5 tracks", "45.2%"
   log?: string[];
+  is_search?: boolean; // true when created via /download/search
+  mode?: string; // "url" or "search" — distinguishes download source mode
 }
 
 export interface Track {
   id: number;
+  path?: string | null;
   title: string;
   artist: string;
   album_artist: string;
@@ -409,6 +425,8 @@ export interface Playlist {
   track_count: number;
   total_duration: number;
   created_at: number;
+  description: string;
+  cover_art_path: string;
 }
 
 export interface PlaylistWithTracks extends Playlist {

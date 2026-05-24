@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ func Open(path string) (*sql.DB, error) {
 const schema = `
 CREATE TABLE IF NOT EXISTS tracks (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	path TEXT NOT NULL UNIQUE,
+	path TEXT NOT NULL,
 	title TEXT,
 	artist TEXT,
 	album_artist TEXT,
@@ -46,12 +47,15 @@ CREATE TABLE IF NOT EXISTS tracks (
 	spotify_id TEXT,
 	external_url TEXT,
 	apple_id TEXT,
+	file_sha256 TEXT,
 	user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
 CREATE INDEX IF NOT EXISTS idx_tracks_kind ON tracks(media_kind);
 CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);
+CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_user_path ON tracks(user_id, path) WHERE user_id IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
 	title, artist, album, genre,
@@ -164,12 +168,21 @@ CREATE TABLE IF NOT EXISTS podcast_feeds (
     language TEXT,
     last_fetched_at INTEGER,
     last_error TEXT,
-    auto_download INTEGER NOT NULL DEFAULT 0,
     download_folder TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_podcast_feeds_url ON podcast_feeds(url);
+
+CREATE TABLE IF NOT EXISTS podcast_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    feed_id INTEGER NOT NULL REFERENCES podcast_feeds(id) ON DELETE CASCADE,
+    auto_download INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(user_id, feed_id)
+);
+CREATE INDEX IF NOT EXISTS idx_podcast_subs_user ON podcast_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_podcast_subs_feed ON podcast_subscriptions(feed_id);
 
 CREATE TABLE IF NOT EXISTS podcast_episodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,7 +195,6 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
     audio_url TEXT,
     audio_type TEXT,
     audio_size INTEGER,
-    downloaded INTEGER NOT NULL DEFAULT 0,
     file_path TEXT,
     file_size INTEGER,
     download_error TEXT,
@@ -190,7 +202,19 @@ CREATE TABLE IF NOT EXISTS podcast_episodes (
     UNIQUE(feed_id, guid)
 );
 CREATE INDEX IF NOT EXISTS idx_podcast_episodes_feed ON podcast_episodes(feed_id);
-CREATE INDEX IF NOT EXISTS idx_podcast_episodes_downloaded ON podcast_episodes(downloaded);
+
+CREATE TABLE IF NOT EXISTS podcast_episode_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    episode_id INTEGER NOT NULL REFERENCES podcast_episodes(id) ON DELETE CASCADE,
+    downloaded INTEGER NOT NULL DEFAULT 0,
+    playback_position_sec INTEGER NOT NULL DEFAULT 0,
+    listened INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(user_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS idx_podcast_ep_status_user ON podcast_episode_status(user_id);
+CREATE INDEX IF NOT EXISTS idx_podcast_ep_status_ep ON podcast_episode_status(episode_id);
 
 -- User authentication (v3.6.0)
 CREATE TABLE IF NOT EXISTS users (
@@ -245,9 +269,11 @@ var validTables = map[string]bool{
 	"spotify_tokens":   true,
 	"spotify_pkce":     true,
 	"download_jobs":    true,
-	"podcast_feeds":    true,
-	"podcast_episodes": true,
-	"tracks_fts":       true,
+	"podcast_feeds":              true,
+	"podcast_subscriptions":     true,
+	"podcast_episodes":          true,
+	"podcast_episode_status":    true,
+	"tracks_fts":                true,
 	"apple_music_config": true,
 	"apple_music_user":   true,
 }
@@ -257,7 +283,7 @@ func columnExists(db *sql.DB, table, column string) bool {
 	if !validTables[table] {
 		return false
 	}
-	if matched, _ := regexp.MatchString(`^[a-z_]+$`, column); !matched {
+	if matched, _ := regexp.MatchString(`^[a-z0-9_]+$`, column); !matched {
 		log.Printf("[db] columnExists: invalid column name %q", column)
 		return false
 	}
@@ -286,9 +312,11 @@ func columnExists(db *sql.DB, table, column string) bool {
 }
 
 func Migrate(db *sql.DB) error {
+	log.Printf("[db] starting migration...")
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
+	log.Printf("[db] schema executed successfully")
 	// Additive column migrations (idempotent)
 	// Add type column to recommendations (for playlist cache differentiation)
 	if !columnExists(db, "recommendations", "type") {
@@ -346,17 +374,9 @@ func Migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	// Add playback position tracking to podcast_episodes
-	if !columnExists(db, "podcast_episodes", "playback_position_sec") {
-		if _, err := db.Exec(`ALTER TABLE podcast_episodes ADD COLUMN playback_position_sec INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-	}
-	if !columnExists(db, "podcast_episodes", "listened") {
-		if _, err := db.Exec(`ALTER TABLE podcast_episodes ADD COLUMN listened INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-	}
+	// Podcast playback position/listened moved to podcast_episode_status in v3.7.0.
+	// The schema constant above creates podcast_episode_status with these columns.
+	// No migration needed — existing data will be handled by the podcast multi-user migration below.
 	// Apple Music: per-track id column + unique partial index (mirrors spotify_id pattern)
 	if !columnExists(db, "tracks", "apple_id") {
 		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN apple_id TEXT`); err != nil {
@@ -409,14 +429,145 @@ if !columnExists(db, "tracks", "user_id") {
 			return err
 		}
 	}
-	if !columnExists(db, "podcast_feeds", "user_id") {
-		if _, err := db.Exec(`ALTER TABLE podcast_feeds ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`); err != nil {
-			return err
+	// Podcast feeds user_id/auto_download removed in v3.7.0 (moved to podcast_subscriptions).
+	// The schema constant above creates podcast_feeds without these columns.
+	// The migration block below handles upgrading existing installations.
+
+	// Podcast multi-user migration (v3.7.0): separate shared feed data from
+	// per-user subscriptions. Creates podcast_subscriptions and podcast_episode_status
+	// tables, migrates existing data, then recreates podcast_feeds and podcast_episodes
+	// without per-user columns.
+	{
+		var podcastMigrated int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='podcast_subscriptions'`).Scan(&podcastMigrated); err != nil {
+			return fmt.Errorf("podcast migration: check subscriptions table: %w", err)
 		}
-	}
-	if !columnExists(db, "podcast_feeds", "auto_download") {
-		if _, err := db.Exec(`ALTER TABLE podcast_feeds ADD COLUMN auto_download INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
+		log.Printf("[db] podcast migration: podcast_subscriptions exists=%d", podcastMigrated)
+		if podcastMigrated == 0 {
+			log.Printf("[db] podcast migration: RUNNING migration block")
+			log.Printf("[db] podcast multi-user migration: creating subscription tables...")
+
+			// Create subscription tables (new installs get these from schema constant,
+			// but existing installs need them created here before data migration)
+			if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS podcast_subscriptions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				feed_id INTEGER NOT NULL REFERENCES podcast_feeds(id) ON DELETE CASCADE,
+				auto_download INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+				UNIQUE(user_id, feed_id)
+			)`); err != nil {
+				return fmt.Errorf("podcast migration: create subscriptions: %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_subs_user ON podcast_subscriptions(user_id)`); err != nil {
+				return err
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_subs_feed ON podcast_subscriptions(feed_id)`); err != nil {
+				return err
+			}
+
+			if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS podcast_episode_status (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				episode_id INTEGER NOT NULL REFERENCES podcast_episodes(id) ON DELETE CASCADE,
+				downloaded INTEGER NOT NULL DEFAULT 0,
+				playback_position_sec INTEGER NOT NULL DEFAULT 0,
+				listened INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+				UNIQUE(user_id, episode_id)
+			)`); err != nil {
+				return fmt.Errorf("podcast migration: create episode_status: %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_ep_status_user ON podcast_episode_status(user_id)`); err != nil {
+				return err
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_ep_status_ep ON podcast_episode_status(episode_id)`); err != nil {
+				return err
+			}
+
+			// Migrate existing feeds: create subscriptions for feeds with user_id
+			_, err := db.Exec(`INSERT OR IGNORE INTO podcast_subscriptions(user_id, feed_id, auto_download)
+				SELECT user_id, id, auto_download FROM podcast_feeds WHERE user_id IS NOT NULL`)
+			if err != nil {
+				return fmt.Errorf("podcast migration: migrate feed subscriptions: %w", err)
+			}
+
+			// Migrate existing episodes: create status for downloaded episodes
+			// Join with podcast_feeds to get the user_id
+			_, err = db.Exec(`INSERT OR IGNORE INTO podcast_episode_status(user_id, episode_id, downloaded)
+				SELECT f.user_id, e.id, e.downloaded
+				FROM podcast_episodes e
+				JOIN podcast_feeds f ON f.id = e.feed_id
+				WHERE e.downloaded = 1 AND f.user_id IS NOT NULL`)
+			if err != nil {
+				return fmt.Errorf("podcast migration: migrate episode status: %w", err)
+			}
+
+			// Recreate podcast_feeds without user_id and auto_download
+			if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+				return err
+			}
+			if _, err := db.Exec(`
+				CREATE TABLE podcast_feeds_v2 (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					url TEXT NOT NULL UNIQUE,
+					title TEXT, description TEXT, image_url TEXT, author TEXT,
+					link TEXT, language TEXT, last_fetched_at INTEGER, last_error TEXT,
+					download_folder TEXT,
+					created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+				)
+			`); err != nil {
+				return fmt.Errorf("podcast migration: create feeds_v2: %w", err)
+			}
+			if _, err := db.Exec(`INSERT INTO podcast_feeds_v2 SELECT id, url, title, description, image_url, author, link, language, last_fetched_at, last_error, download_folder, created_at FROM podcast_feeds`); err != nil {
+				return fmt.Errorf("podcast migration: copy feeds: %w", err)
+			}
+			if _, err := db.Exec(`DROP TABLE podcast_feeds`); err != nil {
+				return fmt.Errorf("podcast migration: drop old feeds: %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE podcast_feeds_v2 RENAME TO podcast_feeds`); err != nil {
+				return fmt.Errorf("podcast migration: rename feeds: %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_feeds_url ON podcast_feeds(url)`); err != nil {
+				return err
+			}
+
+			// Recreate podcast_episodes without downloaded column
+			if _, err := db.Exec(`
+				CREATE TABLE podcast_episodes_v2 (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					feed_id INTEGER NOT NULL REFERENCES podcast_feeds(id) ON DELETE CASCADE,
+					guid TEXT NOT NULL,
+					title TEXT, description TEXT, pub_date INTEGER,
+					duration_sec INTEGER, audio_url TEXT, audio_type TEXT, audio_size INTEGER,
+					file_path TEXT, file_size INTEGER, download_error TEXT,
+					created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+					UNIQUE(feed_id, guid)
+				)
+			`); err != nil {
+				return fmt.Errorf("podcast migration: create episodes_v2: %w", err)
+			}
+			if _, err := db.Exec(`INSERT INTO podcast_episodes_v2 SELECT id, feed_id, guid, title, description, pub_date, duration_sec, audio_url, audio_type, audio_size, file_path, file_size, download_error, created_at FROM podcast_episodes`); err != nil {
+				return fmt.Errorf("podcast migration: copy episodes: %w", err)
+			}
+			if _, err := db.Exec(`DROP TABLE podcast_episodes`); err != nil {
+				return fmt.Errorf("podcast migration: drop old episodes: %w", err)
+			}
+			if _, err := db.Exec(`ALTER TABLE podcast_episodes_v2 RENAME TO podcast_episodes`); err != nil {
+				return fmt.Errorf("podcast migration: rename episodes: %w", err)
+			}
+			if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_episodes_feed ON podcast_episodes(feed_id)`); err != nil {
+				return err
+			}
+
+			// Update subscription foreign key to point to new feeds table
+			// (SQLite doesn't enforce FK after table recreation, but the data is intact)
+
+			if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+				return err
+			}
+
+			log.Printf("[db] podcast multi-user migration: complete")
 		}
 	}
 	if !columnExists(db, "download_jobs", "user_id") {
@@ -446,8 +597,10 @@ if !columnExists(db, "tracks", "user_id") {
 		}
 		adminID, _ := res.LastInsertId()
 
-		// Assign all existing data to the default admin user.
-		for _, table := range []string{"tracks", "plays", "playlists", "podcast_feeds", "download_jobs", "recommendations"} {
+		// Assign existing data to the default admin user.
+		// Playlists are NOT assigned — they remain with user_id IS NULL
+		// so all users can see legacy playlists (household sharing model).
+		for _, table := range []string{"tracks", "plays", "download_jobs", "recommendations"} {
 			if _, err := db.Exec(`UPDATE `+table+` SET user_id=? WHERE user_id IS NULL`, adminID); err != nil {
 				return err
 			}
@@ -468,9 +621,6 @@ if !columnExists(db, "tracks", "user_id") {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_download_jobs_user ON download_jobs(user_id)`); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_podcast_feeds_user ON podcast_feeds(user_id)`); err != nil {
 		return err
 	}
 
@@ -503,6 +653,160 @@ if !columnExists(db, "tracks", "user_id") {
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_apple_user_luid ON apple_music_user(lexicon_user_id)`); err != nil {
 		return err
+	}
+
+	// file_sha256 column for file-level dedup — must be added BEFORE the dedup
+	// migration below, so that the old table has the same column count as tracks_v2
+	// when INSERT INTO tracks_v2 SELECT * FROM tracks runs.
+	if !columnExists(db, "tracks", "file_sha256") {
+		if _, err := db.Exec(`ALTER TABLE tracks ADD COLUMN file_sha256 TEXT`); err != nil {
+			return fmt.Errorf("dedup: add file_sha256: %w", err)
+		}
+	}
+
+	// Cross-user download dedup (v3.7.0): remove UNIQUE constraint on tracks.path,
+	// add UNIQUE(user_id, path) for cross-user file sharing.
+	// For existing databases, recreate the tracks table without the UNIQUE.
+	// For fresh installs, the updated const schema already has the correct structure.
+	{
+		var dedupDone int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dedup_migration_done'`).Scan(&dedupDone); err != nil {
+			return fmt.Errorf("dedup migration: check marker: %w", err)
+		}
+		if dedupDone == 0 {
+			var trackCount int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM tracks`).Scan(&trackCount); err != nil {
+				return fmt.Errorf("dedup migration: count tracks: %w", err)
+			}
+			if trackCount > 0 {
+				log.Printf("[db] dedup migration: recreating tracks table (%d rows) to remove UNIQUE on path...", trackCount)
+				// Disable foreign keys during migration
+				if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+					return fmt.Errorf("dedup migration: disable FK: %w", err)
+				}
+				// Create new table without UNIQUE on path
+				if _, err := db.Exec(`
+					CREATE TABLE tracks_v2 (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						path TEXT NOT NULL,
+						title TEXT,
+						artist TEXT,
+						album_artist TEXT,
+						album TEXT,
+						track_no INTEGER,
+						disc_no INTEGER,
+						year INTEGER,
+						genre TEXT,
+						duration_sec INTEGER,
+						mime TEXT,
+						size_bytes INTEGER,
+						media_kind TEXT NOT NULL DEFAULT 'music',
+						cover_path TEXT,
+						added_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+						mtime INTEGER,
+						spotify_id TEXT,
+						external_url TEXT,
+						apple_id TEXT,
+						file_sha256 TEXT,
+						loudness_integrated REAL,
+						loudness_true_peak REAL,
+						loudness_range REAL,
+						user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+					)
+				`); err != nil {
+					return fmt.Errorf("dedup migration: create tracks_v2: %w", err)
+				}
+				// Copy all data
+				if _, err := db.Exec(`INSERT INTO tracks_v2 SELECT * FROM tracks`); err != nil {
+					return fmt.Errorf("dedup migration: copy data: %w", err)
+				}
+				// Drop old table
+				if _, err := db.Exec(`DROP TABLE tracks`); err != nil {
+					return fmt.Errorf("dedup migration: drop old tracks: %w", err)
+				}
+				// Rename
+				if _, err := db.Exec(`ALTER TABLE tracks_v2 RENAME TO tracks`); err != nil {
+					return fmt.Errorf("dedup migration: rename: %w", err)
+				}
+				// Rebuild indexes
+				if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist)`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album)`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_kind ON tracks(media_kind)`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre)`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(path)`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_user_path ON tracks(user_id, path) WHERE user_id IS NOT NULL`); err != nil {
+					return err
+				}
+				// Rebuild FTS5 triggers (dropped when old table was dropped)
+				if _, err := db.Exec(`DROP TRIGGER IF EXISTS tracks_ai`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE TRIGGER tracks_ai AFTER INSERT ON tracks BEGIN
+					INSERT INTO tracks_fts(rowid, title, artist, album, genre)
+					VALUES (new.id, new.title, new.artist, new.album, new.genre);
+				END`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`DROP TRIGGER IF EXISTS tracks_ad`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE TRIGGER tracks_ad AFTER DELETE ON tracks BEGIN
+					INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre)
+					VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre);
+				END`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`DROP TRIGGER IF EXISTS tracks_au`); err != nil {
+					return err
+				}
+				if _, err := db.Exec(`CREATE TRIGGER tracks_au AFTER UPDATE ON tracks BEGIN
+					INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, genre)
+					VALUES ('delete', old.id, old.title, old.artist, old.album, old.genre);
+					INSERT INTO tracks_fts(rowid, title, artist, album, genre)
+					VALUES (new.id, new.title, new.artist, new.album, new.genre);
+				END`); err != nil {
+					return err
+				}
+				// Rebuild FTS5 index
+				if _, err := db.Exec(`INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild')`); err != nil {
+					return fmt.Errorf("dedup migration: rebuild FTS5: %w", err)
+				}
+				// Re-enable foreign keys
+				if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+					return fmt.Errorf("dedup migration: enable FK: %w", err)
+				}
+				log.Printf("[db] dedup migration: complete. tracks table recreated with UNIQUE(user_id, path).")
+			}
+			// Mark migration as done
+			if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS dedup_migration_done (done_at INTEGER NOT NULL)`); err != nil {
+				return fmt.Errorf("dedup migration: create marker: %w", err)
+			}
+			if _, err := db.Exec(`INSERT INTO dedup_migration_done VALUES (strftime('%s','now'))`); err != nil {
+				return fmt.Errorf("dedup migration: insert marker: %w", err)
+			}
+		}
+	}
+
+	// dedup columns on download_jobs for tracking which track was used as source
+	if !columnExists(db, "download_jobs", "dedup_source_track_id") {
+		if _, err := db.Exec(`ALTER TABLE download_jobs ADD COLUMN dedup_source_track_id INTEGER`); err != nil {
+			return fmt.Errorf("dedup: add dedup_source_track_id: %w", err)
+		}
+	}
+	if !columnExists(db, "download_jobs", "dedup_method") {
+		if _, err := db.Exec(`ALTER TABLE download_jobs ADD COLUMN dedup_method TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("dedup: add dedup_method: %w", err)
+		}
 	}
 
 	return nil

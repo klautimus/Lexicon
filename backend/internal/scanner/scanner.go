@@ -17,14 +17,19 @@ import (
 )
 
 type Scanner struct {
-	db        *sql.DB
+	db          *sql.DB
 	loudnessSem chan struct{} // semaphore limiting concurrent ffmpeg loudness measurements
+	ffmpegBin   string        // path to ffmpeg binary (from config)
 }
 
-func New(db *sql.DB) *Scanner {
+func New(db *sql.DB, ffmpegBin string) *Scanner {
+	if ffmpegBin == "" {
+		ffmpegBin = "ffmpeg" // fallback to PATH
+	}
 	return &Scanner{
 		db:          db,
 		loudnessSem: make(chan struct{}, 8), // max 8 concurrent ffmpeg loudness measurements
+		ffmpegBin:   ffmpegBin,
 	}
 }
 
@@ -56,7 +61,7 @@ func measureLoudness(ctx context.Context, path string) loudnessResult {
 
 	if err := cmd.Run(); err != nil {
 		// ffmpeg may return non-zero (e.g. early stream end) but still prints JSON; ignore err
-		log.Printf("[scanner] loudness ffmpeg failed for %s: %v", path, err)
+		return loudnessResult{}
 	}
 
 	// Parse JSON frames from stderr — each line may be a log frame or JSON object
@@ -121,9 +126,9 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 		return nil
 	}
 
-	var existingMtime sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, "SELECT mtime FROM tracks WHERE path=?", path).Scan(&existingMtime); err != nil && err != sql.ErrNoRows {
-		log.Printf("[scanner] failed to query existing mtime for %s: %v", path, err)
+	var existingID, existingMtime sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, "SELECT id, mtime FROM tracks WHERE path=? AND user_id IS NULL LIMIT 1", path).Scan(&existingID, &existingMtime); err != nil && err != sql.ErrNoRows {
+		log.Printf("[scanner] failed to query existing track for %s: %v", path, err)
 	}
 	if existingMtime.Valid && existingMtime.Int64 == mtime {
 		return nil // up-to-date
@@ -160,17 +165,27 @@ func (s *Scanner) indexFile(ctx context.Context, path, mime string) error {
 		kind = "podcast"
 	}
 
-	// Insert/update the track in the DB first (fast path — no blocking ffmpeg call)
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tracks(path,title,artist,album_artist,album,track_no,disc_no,year,genre,mime,size_bytes,cover_path,added_at,media_kind,mtime,loudness_integrated,loudness_true_peak,loudness_range,user_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(path) DO UPDATE SET
-			title=excluded.title, artist=excluded.artist, album_artist=excluded.album_artist,
-			album=excluded.album, track_no=excluded.track_no, disc_no=excluded.disc_no,
-			year=excluded.year, genre=excluded.genre, mime=excluded.mime,
-			size_bytes=excluded.size_bytes, cover_path=excluded.cover_path, media_kind=excluded.media_kind, mtime=excluded.mtime,
-			loudness_integrated=excluded.loudness_integrated, loudness_true_peak=excluded.loudness_true_peak, loudness_range=excluded.loudness_range
-	`, path, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime, info.Size(), "", 0, kind, mtime, 0.0, 0.0, 0.0, nil)
+	// Upsert: ON CONFLICT(path) no longer works after dedup migration removed
+	// the UNIQUE constraint on tracks.path. Use explicit SELECT-then-UPDATE/INSERT.
+	if existingID.Valid {
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE tracks SET
+				title=?, artist=?, album_artist=?, album=?,
+				track_no=?, disc_no=?, year=?, genre=?, mime=?,
+				size_bytes=?, cover_path=?, media_kind=?, mtime=?,
+				loudness_integrated=?, loudness_true_peak=?, loudness_range=?
+			WHERE id=?
+		`, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime,
+			info.Size(), "", kind, mtime,
+			0.0, 0.0, 0.0, existingID.Int64)
+	} else {
+		_, err = s.db.ExecContext(ctx, `
+			INSERT INTO tracks(path,title,artist,album_artist,album,track_no,disc_no,year,genre,mime,size_bytes,cover_path,added_at,media_kind,mtime,loudness_integrated,loudness_true_peak,loudness_range,user_id)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`, path, title, artist, albumArtist, album, trackNo, discNo, year, genre, mime,
+			info.Size(), "", time.Now().Unix(), kind, mtime,
+			0.0, 0.0, 0.0, nil)
+	}
 	if err != nil {
 		return err
 	}

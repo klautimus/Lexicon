@@ -54,7 +54,7 @@ type Message struct {
 	// (DevicePicker sends {queue, currentTrack, position} on transfer).
 	Queue        json.RawMessage `json:"queue,omitempty"`
 	CurrentTrack json.RawMessage `json:"currentTrack,omitempty"`
-	Devices      json.RawMessage `json:"devices,omitempty"`
+	Devices      json.RawMessage `json:"list,omitempty"`
 }
 
 type Client struct {

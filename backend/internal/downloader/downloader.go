@@ -7,11 +7,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -28,6 +31,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kevin/lexicon/internal/auth"
+	"github.com/kevin/lexicon/internal/models"
 	"github.com/kevin/lexicon/internal/recommender"
 )
 
@@ -137,10 +141,12 @@ type Job struct {
 	Tool       string   `json:"tool,omitempty"`        // "spotiflac", "spotdl", "ytdlp", "poddl", "http", etc.
 	UsedFallback bool   `json:"used_fallback,omitempty"`
 	IsSearch   bool     `json:"is_search,omitempty"`   // true when created via /download/search (no Spotify URL)
-	TrackID       int64    `json:"track_id,omitempty"`       // set when search resolves to existing library track
-	Kind          string   `json:"kind,omitempty"`           // "music" (default) or "podcast"; differentiates the source on the Downloads page
-	UserID        int64    `json:"user_id,omitempty"`        // authenticated user who created this job
-	Log           []string `json:"log,omitempty"`
+	TrackID             int64    `json:"track_id,omitempty"`              // set when search resolves to existing library track
+	Kind                string   `json:"kind,omitempty"`                  // "music" (default) or "podcast"; differentiates the source on the Downloads page
+	UserID              int64    `json:"user_id,omitempty"`               // authenticated user who created this job
+	DedupSourceTrackID  int64    `json:"dedup_source_track_id,omitempty"` // original track ID when resolved via cross-user dedup
+	DedupMethod         string   `json:"dedup_method,omitempty"`          // e.g. "title_match", "file_hash", "title_match+hash_available"
+	Log                 []string `json:"log,omitempty"`
 	Progress      float64  `json:"progress,omitempty"`       // 0-100 download percentage
 	ProgressLabel string   `json:"progress_label,omitempty"` // e.g. "1/5 tracks", "45.2%"
 
@@ -254,7 +260,7 @@ func (a *API) recoverJobs() {
 	_, _ = a.db.Exec(`UPDATE download_jobs SET status='failed', error='server restarted' WHERE status IN ('running','queued')`)
 
 	// Load the most recent maxKeep jobs into memory
-	rows, err := a.db.Query(`SELECT id, url, output, status, started_at, finished_at, error, tool, used_fallback, is_search, track_id, IFNULL(kind, 'music') FROM download_jobs ORDER BY created_at DESC LIMIT ?`, a.maxKeep)
+	rows, err := a.db.Query(`SELECT id, url, output, status, started_at, finished_at, error, tool, used_fallback, is_search, track_id, IFNULL(kind, 'music'), IFNULL(dedup_source_track_id, 0), IFNULL(dedup_method, '') FROM download_jobs ORDER BY created_at DESC LIMIT ?`, a.maxKeep)
 	if err != nil {
 		log.Printf("[downloader] recoverJobs query: %v", err)
 		return
@@ -266,7 +272,9 @@ func (a *API) recoverJobs() {
 		var errStr, tool sql.NullString
 		var usedFallback, isSearch int
 		var trackID sql.NullInt64
-		if err := rows.Scan(&j.ID, &j.URL, &j.Output, &j.Status, &j.StartedAt, &finishedAt, &errStr, &tool, &usedFallback, &isSearch, &trackID, &j.Kind); err != nil {
+		var dedupSrc sql.NullInt64
+		var dedupMeth sql.NullString
+		if err := rows.Scan(&j.ID, &j.URL, &j.Output, &j.Status, &j.StartedAt, &finishedAt, &errStr, &tool, &usedFallback, &isSearch, &trackID, &j.Kind, &dedupSrc, &dedupMeth); err != nil {
 			log.Printf("[downloader] recoverJobs scan: %v", err)
 			continue
 		}
@@ -284,9 +292,18 @@ func (a *API) recoverJobs() {
 		if trackID.Valid {
 			j.TrackID = trackID.Int64
 		}
+		if dedupSrc.Valid {
+			j.DedupSourceTrackID = dedupSrc.Int64
+		}
+		if dedupMeth.Valid {
+			j.DedupMethod = dedupMeth.String
+		}
 		j.Log = []string{} // don't restore full log
 		a.jobs[j.ID] = &j
 		a.order = append(a.order, j.ID)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[downloader] recoverJobs rows error: %v", err)
 	}
 	log.Printf("[downloader] recovered %d jobs from database", len(a.jobs))
 }
@@ -378,8 +395,8 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 	// Persist to database
 	if a.db != nil {
 		_, _ = a.db.Exec(
-			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search, kind, user_id) VALUES(?, ?, ?, ?, ?, '', 0, ?, ?)`,
-			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.UserID)
+			`INSERT INTO download_jobs(id, url, output, status, started_at, tool, is_search, kind, user_id, dedup_source_track_id, dedup_method) VALUES(?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.UserID, job.DedupSourceTrackID, job.DedupMethod)
 		a.evictOldJobs()
 	}
 
@@ -391,9 +408,18 @@ type searchReq struct {
 	Query string `json:"query"`
 }
 
+type MatchConfidence int
+
+const (
+	matchExact  MatchConfidence = 1
+	matchPrefix MatchConfidence = 2
+	matchFTS    MatchConfidence = 3
+	matchLike   MatchConfidence = 4
+)
+
 // findLibraryTrack tries multiple strategies to locate an existing track.
 // It handles "Artist - Title" queries generated by the AI playlist feature.
-func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, error) {
+func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, MatchConfidence, error) {
 	cleanQuery := strings.ReplaceAll(query, " - ", " ")
 	cleanQuery = strings.TrimSpace(cleanQuery)
 
@@ -408,7 +434,7 @@ func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, error)
 			`SELECT id FROM tracks WHERE LOWER(title)=LOWER(?) AND LOWER(IFNULL(artist,''))=LOWER(?) LIMIT 1`,
 			title, artist).Scan(&id)
 		if err == nil {
-			return id, nil
+			return id, matchExact, nil
 		}
 
 		// 1b: Title starts with given title, artist matches (handles "Red Eyes (Album Version)")
@@ -416,7 +442,7 @@ func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, error)
 			`SELECT id FROM tracks WHERE LOWER(title) LIKE LOWER(?) AND LOWER(IFNULL(artist,''))=LOWER(?) LIMIT 1`,
 			title+"%", artist).Scan(&id)
 		if err == nil {
-			return id, nil
+			return id, matchPrefix, nil
 		}
 	}
 
@@ -432,7 +458,7 @@ func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, error)
 			`SELECT t.id FROM tracks_fts f JOIN tracks t ON t.id=f.rowid
 			 WHERE tracks_fts MATCH ? ORDER BY rank LIMIT 1`, ftsQ).Scan(&id)
 		if err == nil {
-			return id, nil
+			return id, matchFTS, nil
 		}
 	}
 
@@ -445,10 +471,10 @@ func (a *API) findLibraryTrack(ctx context.Context, query string) (int64, error)
 		 LIMIT 1`,
 		likeQ, likeQ).Scan(&id)
 	if err == nil {
-		return id, nil
+		return id, matchLike, nil
 	}
 
-	return 0, sql.ErrNoRows
+	return 0, 0, sql.ErrNoRows
 }
 
 func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
@@ -473,42 +499,80 @@ func (a *API) searchEnqueue(w http.ResponseWriter, r *http.Request) {
 
 	// Check library first to avoid re-downloading existing tracks
 	if a.db != nil {
-		trackID, err := a.findLibraryTrack(r.Context(), query)
+		trackID, confidence, err := a.findLibraryTrack(r.Context(), query)
 		if err == nil && trackID > 0 {
-			log.Printf("[downloader] searchEnqueue: query=%q resolved to existing track %d", query, trackID)
-			job := &Job{
-				ID:         uuid.NewString(),
-				URL:        query,
-				Output:     a.cfg.Output,
-				Status:     StatusSucceeded,
-				StartedAt:  time.Now().Unix(),
-				FinishedAt: time.Now().Unix(),
-				IsSearch:   true,
-				TrackID:    trackID,
-				Kind:       "music",
-				UserID:     getUserID(r),
-				Log:        []string{"[search] resolved to existing library track"},
-			}
-			a.mu.Lock()
-			a.jobs[job.ID] = job
-			a.order = append([]string{job.ID}, a.order...)
-			if len(a.order) > a.maxKeep {
-				for _, oldID := range a.order[a.maxKeep:] {
-					delete(a.jobs, oldID)
+			log.Printf("[downloader] searchEnqueue: query=%q resolved to existing track %d (confidence=%d)", query, trackID, confidence)
+
+			// Cross-user dedup: resolve the correct track ID for the requesting user.
+			uid := getUserID(r)
+			sharedTrackID := trackID
+			dedupSourceID := trackID
+			dedupMethod := fmt.Sprintf("title_match:%d", confidence)
+			if uid > 0 {
+				if a.userOwnsTrack(r.Context(), uid, trackID) {
+					// User already has a track for this file — use their own ID.
+					var sourcePath string
+					if err := a.db.QueryRowContext(r.Context(),
+						`SELECT path FROM tracks WHERE id=?`, trackID).Scan(&sourcePath); err == nil {
+						var ownID int64
+						if err := a.db.QueryRowContext(r.Context(),
+							`SELECT id FROM tracks WHERE user_id=? AND path=? LIMIT 1`,
+							uid, sourcePath).Scan(&ownID); err == nil && ownID > 0 {
+							sharedTrackID = ownID
+							dedupSourceID = 0 // not a cross-user share
+						}
+					}
+				} else {
+					newID, shareErr := a.shareTrack(r.Context(), trackID, uid)
+					if shareErr != nil {
+						log.Printf("[downloader] searchEnqueue: shareTrack failed track=%d user=%d: %v", trackID, uid, shareErr)
+						sharedTrackID = 0
+						dedupSourceID = 0
+					} else {
+						sharedTrackID = newID
+						log.Printf("[downloader] searchEnqueue: shared track %d → %d for user %d", trackID, newID, uid)
+					}
 				}
-				a.order = a.order[:a.maxKeep]
-			}
-			a.mu.Unlock()
-
-			// Persist to database
-			if a.db != nil {
-				_, _ = a.db.Exec(
-					`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id, kind, user_id) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-					job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID, job.Kind, job.UserID)
 			}
 
-			writeJSON(w, jobSummary(job))
-			return
+			if sharedTrackID > 0 {
+				job := &Job{
+					ID:                  uuid.NewString(),
+					URL:                 query,
+					Output:              a.cfg.Output,
+					Status:              StatusSucceeded,
+					StartedAt:           time.Now().Unix(),
+					FinishedAt:          time.Now().Unix(),
+					IsSearch:            true,
+					TrackID:             sharedTrackID,
+					Kind:                "music",
+					UserID:              uid,
+					DedupSourceTrackID:  dedupSourceID,
+					DedupMethod:         dedupMethod,
+					Log:                 []string{fmt.Sprintf("[search] resolved to existing library track %d via %s", sharedTrackID, dedupMethod)},
+				}
+				a.mu.Lock()
+				a.jobs[job.ID] = job
+				a.order = append([]string{job.ID}, a.order...)
+				if len(a.order) > a.maxKeep {
+					for _, oldID := range a.order[a.maxKeep:] {
+						delete(a.jobs, oldID)
+					}
+					a.order = a.order[:a.maxKeep]
+				}
+				a.mu.Unlock()
+
+				// Persist to database
+				if a.db != nil {
+					_, _ = a.db.Exec(
+						`INSERT INTO download_jobs(id, url, output, status, started_at, finished_at, is_search, track_id, kind, user_id, dedup_source_track_id, dedup_method) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+						job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.FinishedAt, job.TrackID, job.Kind, job.UserID, job.DedupSourceTrackID, job.DedupMethod)
+				}
+
+				writeJSON(w, jobSummary(job))
+				return
+			}
+			// shareTrack failed — fall through to normal download
 		}
 	}
 
@@ -849,6 +913,8 @@ func (a *API) run(job *Job, ctx context.Context) {
 
 	if primaryErr == nil {
 		a.finish(job, StatusSucceeded, "")
+		// Before rescan, dedup files against existing library
+		a.dedupRunOutput(ctx, job)
 		if a.rescan != nil {
 			go a.rescan()
 		}
@@ -951,6 +1017,8 @@ func (a *API) run(job *Job, ctx context.Context) {
 			}
 		}
 		a.finish(job, StatusSucceeded, "")
+		// Before rescan, dedup files against existing library
+		a.dedupRunOutput(ctx, job)
 		if a.rescan != nil {
 			go a.rescan()
 		}
@@ -1040,6 +1108,8 @@ func (a *API) run(job *Job, ctx context.Context) {
 		}
 	}
 	a.finish(job, StatusSucceeded, "")
+	// Before rescan, dedup files against existing library
+	a.dedupRunOutput(ctx, job)
 	if a.rescan != nil {
 		go a.rescan()
 	}
@@ -1145,10 +1215,12 @@ func (a *API) runSearch(job *Job, ctx context.Context) {
 			if dlFile != "" {
 				verr := a.verifyDownloadedFile(ctx, dlFile)
 				if verr == nil {
-					if a.rescan != nil {
-						go a.rescan()
-					}
-					a.finish(job, StatusSucceeded, "")
+				// Before rescan, dedup files against existing library
+				a.dedupRunOutput(ctx, job)
+				if a.rescan != nil {
+					go a.rescan()
+				}
+				a.finish(job, StatusSucceeded, "")
 					return
 				}
 				a.appendLog(job, fmt.Sprintf("[verify] SpotiFLAC output invalid: %s", verr.Error()))
@@ -1255,6 +1327,14 @@ func (a *API) runSearch(job *Job, ctx context.Context) {
 	}
 
 	log.Printf("[downloader] runSearch: SUCCESS query=%q job=%s file=%s", job.URL, job.ID, dlFile)
+
+	// Post-download dedup: check output files against existing library
+	// before the scanner indexes them, so cross-user sharing happens first.
+	a.dedupRunOutput(ctx, job)
+	if a.rescan != nil {
+		go a.rescan()
+	}
+
 	a.finish(job, StatusSucceeded, "")
 
 	// Try to resolve the downloaded file to a track ID so the frontend
@@ -1397,7 +1477,7 @@ func (a *API) verifyDownloadedFile(ctx context.Context, path string) error {
 }
 
 func (a *API) findDownloadedFile(before time.Time) string {
-	cutoff := before.Add(-5 * time.Minute)
+	cutoff := before.Add(-30 * time.Minute)
 	a.mu.Lock()
 	// Reuse cache if it's less than 30 seconds old
 	if a.fileCache != nil && time.Since(a.fileCacheTime) < 30*time.Second {
@@ -1475,8 +1555,8 @@ func (a *API) finish(job *Job, status Status, errMsg string) {
 			isSearch = 1
 		}
 		_, _ = a.db.Exec(
-			`UPDATE download_jobs SET status=?, finished_at=?, error=?, tool=?, used_fallback=?, is_search=?, track_id=? WHERE id=?`,
-			string(status), job.FinishedAt, errMsg, job.Tool, usedFallback, isSearch, job.TrackID, job.ID)
+			`UPDATE download_jobs SET status=?, finished_at=?, error=?, tool=?, used_fallback=?, is_search=?, track_id=?, dedup_source_track_id=?, dedup_method=? WHERE id=?`,
+			string(status), job.FinishedAt, errMsg, job.Tool, usedFallback, isSearch, job.TrackID, job.DedupSourceTrackID, job.DedupMethod, job.ID)
 	}
 }
 
@@ -1763,10 +1843,79 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 		query = strings.TrimSuffix(filepath.Base(oldPath), filepath.Ext(oldPath))
 	}
 
-	// Delete old file (best-effort)
+	// Cross-user dedup: if another user already upgraded this track,
+	// share their high-quality file instead of downloading again.
+	uid := getUserID(r)
+	if a.db != nil && title != "" && artist != "" {
+		if dedupTrackID, err := a.findCrossUserDedup(r.Context(), title, artist); err == nil && dedupTrackID > 0 {
+			log.Printf("[upgrade] cross-user dedup: found existing high-quality track %d for %q - %q", dedupTrackID, title, artist)
+
+			// Share the existing high-quality track to the current user
+			if uid > 0 {
+				newTrackID, shareErr := a.shareTrack(r.Context(), dedupTrackID, uid)
+				if shareErr == nil {
+					// Update the original track to point to the shared file
+					var sharedPath string
+					if err := a.db.QueryRowContext(r.Context(),
+						`SELECT path FROM tracks WHERE id=?`, newTrackID).Scan(&sharedPath); err == nil {
+						if sharedPath != "" {
+							_, _ = a.db.Exec(
+								`UPDATE tracks SET path=?, mime=?, size_bytes=?, mtime=? WHERE id=?`,
+								sharedPath, audioMIME(sharedPath), fileSize(sharedPath), time.Now().Unix(), req.TrackID)
+							log.Printf("[upgrade] track %d upgraded via cross-user dedup: shared track %d → %d, path=%s",
+								req.TrackID, dedupTrackID, newTrackID, sharedPath)
+
+							// Safely delete old file if no other users reference it
+							if oldPath != "" {
+								var otherCount int
+								if err := a.db.QueryRowContext(r.Context(),
+									`SELECT COUNT(*) FROM tracks WHERE path=? AND user_id IS NOT NULL AND user_id != ?`,
+									oldPath, uid).Scan(&otherCount); err == nil && otherCount == 0 {
+									if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+										log.Printf("[upgrade] failed to remove old file %s: %v", oldPath, err)
+									}
+								} else {
+									log.Printf("[upgrade] keeping old file %s: %d other user(s) reference it", oldPath, otherCount)
+								}
+							}
+
+							if a.rescan != nil {
+								go a.rescan()
+							}
+							writeJSON(w, map[string]interface{}{
+								"upgraded": true,
+								"method":   "cross_user_dedup",
+								"track_id": req.TrackID,
+								"message":  "Track upgraded via existing high-quality file from another user.",
+							})
+							return
+						}
+					}
+				} else {
+					log.Printf("[upgrade] cross-user dedup: shareTrack failed track=%d user=%d: %v", dedupTrackID, uid, shareErr)
+				}
+			}
+			// shareTrack failed or uid=0 — fall through to normal download
+		}
+	}
+
+	// Safely delete old file — only if no other users reference it
 	if oldPath != "" {
-		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[upgrade] failed to remove old file %s: %v", oldPath, err)
+		if a.db != nil {
+			var otherCount int
+			if err := a.db.QueryRowContext(r.Context(),
+				`SELECT COUNT(*) FROM tracks WHERE path=? AND user_id IS NOT NULL AND user_id != ?`,
+				oldPath, uid).Scan(&otherCount); err == nil && otherCount == 0 {
+				if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+					log.Printf("[upgrade] failed to remove old file %s: %v", oldPath, err)
+				}
+			} else {
+				log.Printf("[upgrade] keeping old file %s: %d other user(s) reference it", oldPath, otherCount)
+			}
+		} else {
+			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[upgrade] failed to remove old file %s: %v", oldPath, err)
+			}
 		}
 	}
 
@@ -1781,6 +1930,7 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 		IsSearch:  true,
 		Kind:      "music",
 		TrackID:   req.TrackID,
+		UserID:    uid,
 	}
 	a.mu.Lock()
 	a.jobs[job.ID] = job
@@ -1795,8 +1945,8 @@ func (a *API) upgradeTrack(w http.ResponseWriter, r *http.Request) {
 
 	if a.db != nil {
 		_, _ = a.db.Exec(
-			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind, track_id) VALUES(?, ?, ?, ?, ?, 1, ?, ?)`,
-			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.TrackID)
+			`INSERT INTO download_jobs(id, url, output, status, started_at, is_search, kind, track_id, user_id) VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+			job.ID, job.URL, job.Output, string(job.Status), job.StartedAt, job.Kind, job.TrackID, job.UserID)
 	}
 
 	var wg sync.WaitGroup
@@ -1975,3 +2125,222 @@ func (a *API) upgradeAll(w http.ResponseWriter, r *http.Request) {
 		"message":        fmt.Sprintf("Enqueued %d/%d tracks for upgrade. Poll /api/download/jobs/{id} for status.", len(jobIDs), len(tracks)),
 	})
 }
+
+func (a *API) computeFileSHA256(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// findLibraryTrackByFile checks if a file with the same SHA256 hash already
+// exists in the library (any user). Used for post-download file-level dedup.
+// Returns the track ID if found, 0 otherwise.
+
+func (a *API) findLibraryTrackByFile(ctx context.Context, filePath string) (int64, error) {
+	// Strategy 1: exact path match
+	var id int64
+	err := a.db.QueryRowContext(ctx,
+		`SELECT id FROM tracks WHERE path=? LIMIT 1`, filePath).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+
+	// Strategy 2: SHA256 hash match
+	hash := a.computeFileSHA256(filePath)
+	if hash == "" {
+		return 0, sql.ErrNoRows
+	}
+	err = a.db.QueryRowContext(ctx,
+		`SELECT id FROM tracks WHERE file_sha256=? LIMIT 1`, hash).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+
+	return 0, sql.ErrNoRows
+}
+// findCrossUserDedup searches across ALL users for an existing high-quality
+// track matching the given title and artist. Only returns matches where the
+// file has an upgrade-quality format (.opus, .m4a). Used by upgradeTrack to
+// avoid re-downloading tracks another user has already upgraded.
+func (a *API) findCrossUserDedup(ctx context.Context, title, artist string) (int64, error) {
+	var id int64
+	err := a.db.QueryRowContext(ctx,
+		`SELECT id FROM tracks
+		 WHERE LOWER(title)=LOWER(?) AND LOWER(IFNULL(artist,''))=LOWER(?)
+		 AND media_kind='music'
+		 AND (path LIKE '%.opus' OR path LIKE '%.m4a')
+		 LIMIT 1`,
+		title, artist).Scan(&id)
+	return id, err
+}
+
+// shareTrack creates a new track record for targetUserID that points to the
+// same file_path as sourceTrackID. Returns the new track ID.
+// All metadata is copied from the source track; user-specific fields
+// (user_id, added_at) are set for the target user.
+// If the target user already has a track record for this path, the existing
+// ID is returned instead of creating a duplicate.
+
+func (a *API) shareTrack(ctx context.Context, sourceTrackID, targetUserID int64) (int64, error) {
+	if sourceTrackID <= 0 || targetUserID <= 0 {
+		return 0, fmt.Errorf("shareTrack: invalid IDs source=%d target=%d", sourceTrackID, targetUserID)
+	}
+
+	// Read source track
+	src, err := models.ScanTrack(a.db.QueryRowContext(ctx,
+		`SELECT `+models.TrackCols+` FROM tracks WHERE id=?`, sourceTrackID))
+	if err != nil {
+		return 0, fmt.Errorf("shareTrack: source track %d: %w", sourceTrackID, err)
+	}
+
+	// Verify source file still exists on disk
+	if _, err := os.Stat(src.Path); os.IsNotExist(err) {
+		return 0, fmt.Errorf("shareTrack: source file deleted: %s", src.Path)
+	}
+
+	// Check if target user already has a track for this path
+	var existingID int64
+	err = a.db.QueryRowContext(ctx,
+		`SELECT id FROM tracks WHERE user_id=? AND path=? LIMIT 1`,
+		targetUserID, src.Path).Scan(&existingID)
+	if err == nil {
+		return existingID, nil // already shared
+	}
+
+	// Compute SHA256 if not already set on source
+	if src.FileSHA256 == "" {
+		src.FileSHA256 = a.computeFileSHA256(src.Path)
+	}
+
+	// Insert new track record with target user_id, same path
+	now := time.Now().Unix()
+	res, err := a.db.ExecContext(ctx,
+		`INSERT INTO tracks
+		 (path, title, artist, album_artist, album, track_no, disc_no, year,
+		  genre, duration_sec, media_kind, mime, size_bytes, cover_path,
+		  added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range,
+		  spotify_id, external_url, apple_id, file_sha256, user_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		src.Path, src.Title, src.Artist, src.AlbumArtist, src.Album,
+		src.TrackNo, src.DiscNo, src.Year, src.Genre, src.DurationSec,
+		src.MediaKind, src.Mime, src.SizeBytes, src.CoverPath,
+		now, src.Mtime, src.LoudnessIntegrated,
+		src.LoudnessTruePeak, src.LoudnessRange,
+		src.SpotifyID, src.ExternalURL, src.AppleID, src.FileSHA256, targetUserID)
+	if err != nil {
+		return 0, fmt.Errorf("shareTrack: insert shared track: %w", err)
+	}
+	newID, _ := res.LastInsertId()
+
+	log.Printf("[downloader] shareTrack: shared track %d → %d for user %d (path=%s)",
+		sourceTrackID, newID, targetUserID, src.Path)
+
+	// FTS5 trigger handles indexing automatically
+	return newID, nil
+}
+
+// userOwnsTrack returns true if the given user already has a track record
+// (directly or via cross-user share) for the given track.
+
+func (a *API) userOwnsTrack(ctx context.Context, userID, trackID int64) bool {
+	if userID <= 0 || trackID <= 0 {
+		return false
+	}
+	// Check if user already has a track with the same path
+	var sourcePath string
+	err := a.db.QueryRowContext(ctx,
+		`SELECT path FROM tracks WHERE id=?`, trackID).Scan(&sourcePath)
+	if err != nil {
+		return false
+	}
+	var count int
+	err = a.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tracks WHERE user_id=? AND path=?`,
+		userID, sourcePath).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+// dedupRunOutput walks the download output directory for newly downloaded
+// audio files and checks if any already exist in the library (cross-user).
+// When a match is found, the existing track is shared to the job's user
+// via shareTrack() instead of letting the scanner create a new one.
+// This is the post-hoc dedup approach for enqueue() (Spotify URL downloads).
+func (a *API) dedupRunOutput(ctx context.Context, job *Job) {
+	if a.db == nil || job.UserID <= 0 {
+		return
+	}
+	outputDir := a.cfg.Output
+	if outputDir == "" {
+		return
+	}
+
+	cutoff := time.Unix(job.StartedAt, 0)
+	sharedCount := 0
+	err := filepath.WalkDir(outputDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if d.IsDir() {
+			return nil // continue walking subdirectories
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		// Only consider files created/modified after this job started
+		if info.ModTime().Before(cutoff) {
+			return nil
+		}
+
+		// Skip non-audio files
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".mp3", ".flac", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".wav", ".mp4", ".webm":
+		default:
+			return nil
+		}
+
+		// Check if any user already has a track with this file path
+		existingID, err := a.findLibraryTrackByFile(ctx, path)
+		if err != nil || existingID <= 0 {
+			return nil
+		}
+
+		// Check if requesting user already owns this track
+		if a.userOwnsTrack(ctx, job.UserID, existingID) {
+			return nil
+		}
+
+		// Share the existing track to the requesting user
+		newID, err := a.shareTrack(ctx, existingID, job.UserID)
+		if err != nil {
+			log.Printf("[downloader] dedupRunOutput: shareTrack failed existing=%d user=%d: %v",
+				existingID, job.UserID, err)
+			return nil
+		}
+
+		sharedCount++
+		log.Printf("[downloader] dedupRunOutput: shared %s → track %d for user %d",
+			path, newID, job.UserID)
+		return nil
+	})
+	if err != nil {
+		log.Printf("[downloader] dedupRunOutput: walk dir %s: %v", outputDir, err)
+		return
+	}
+
+	if sharedCount > 0 {
+		log.Printf("[downloader] dedupRunOutput: shared %d file(s) from existing library", sharedCount)
+	}
+}
+

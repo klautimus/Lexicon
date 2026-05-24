@@ -1,16 +1,22 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import {
-  Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown, HelpCircle, AlertCircle
+  Rss, Plus, RefreshCw, Download, Play, Trash2, Check, Loader2, Search, X, MessageSquare, ChevronDown, HelpCircle, AlertCircle, MoreHorizontal, ListMusic, ArrowUpDown, Filter, Eye, EyeOff
 } from "lucide-react";
-import { api, PodcastFeed, PodcastEpisode, Track } from "../lib/api";
+import { api, PodcastFeed, PodcastEpisode, Track, Playlist } from "../lib/api";
 import { useToast } from "../contexts/ToastContext";
 import { usePlayer } from "../player/PlayerContext";
 import { useHelp } from "../contexts/HelpContext";
+import { useIsMobile } from "../hooks/useIsMobile";
+
+type SortField = "date" | "duration" | "title";
+type SortDir = "asc" | "desc";
+type FilterMode = "all" | "downloaded" | "not_downloaded" | "listened" | "not_listened";
 
 export default function PodcastsPage() {
   const toast = useToast();
   const player = usePlayer();
   const { showHelp } = useHelp();
+  const isMobile = useIsMobile();
   const [feeds, setFeeds] = useState<PodcastFeed[]>([]);
   const [selectedFeed, setSelectedFeed] = useState<PodcastFeed | null>(null);
   const [episodes, setEpisodes] = useState<PodcastEpisode[]>([]);
@@ -18,15 +24,27 @@ export default function PodcastsPage() {
   const [error, setError] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [downloadingIds, setDownloadingIds] = useState<Set<number>>(new Set());
+  const [showDownloadConfirm, setShowDownloadConfirm] = useState(false);
+  const [feedToDownload, setFeedToDownload] = useState<number | null>(null);
+  const [subscribing, setSubscribing] = useState(false);
   const pollIntervals = useRef<Map<number, ReturnType<typeof setInterval>>>(new Map());
   const selectedFeedRef = useRef<PodcastFeed | null>(null);
   selectedFeedRef.current = selectedFeed;
 
-  // Cleanup all polling intervals on unmount
+  // Phase 2: Sorting, filtering, search
+  const [sortField, setSortField] = useState<SortField>("date");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [filterMode, setFilterMode] = useState<FilterMode>("all");
+  const [searchText, setSearchText] = useState("");
+  const [showSortMenu, setShowSortMenu] = useState(false);
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
+
+  // Cleanup all polling intervals + downloading state on unmount
   useEffect(() => {
     return () => {
       pollIntervals.current.forEach((interval) => clearInterval(interval));
       pollIntervals.current.clear();
+      setDownloadingIds(new Set());
     };
   }, []);
 
@@ -35,7 +53,6 @@ export default function PodcastsPage() {
       const f = await api.podcastFeeds();
       setFeeds(f);
       setError(null);
-      // Use ref to read current selectedFeed without adding it as a dependency
       const current = selectedFeedRef.current;
       if (f.length > 0 && !current) {
         setSelectedFeed(f[0]);
@@ -91,7 +108,6 @@ export default function PodcastsPage() {
       // Stop any active downloads for this feed
       setDownloadingIds((prev) => {
         const next = new Set(prev);
-        // Clear all downloading IDs since we're unsubscribing
         next.clear();
         return next;
       });
@@ -118,29 +134,28 @@ export default function PodcastsPage() {
     }
   };
 
+  const confirmDownloadFeed = (feedId: number) => {
+    setFeedToDownload(feedId);
+    setShowDownloadConfirm(true);
+  };
+
   const handleDownloadEpisode = async (episode: PodcastEpisode) => {
     if (!selectedFeed) return;
     setDownloadingIds((prev) => new Set(prev).add(episode.id));
     try {
       await api.podcastDownloadEpisode(episode.id);
       toast.success(`Downloading "${episode.title}" — see Downloads page for progress`);
-      // Poll for completion or error — check downloaded/download_error.
-      // Long episodes can take a while; allow up to 30 minutes before giving up.
       let attempts = 0;
-      const maxAttempts = 600; // 30 minutes at 3s interval
-      // Track the feed ID at poll start time to avoid feed-change bugs
+      const maxAttempts = 600;
       const feedIdAtStart = selectedFeed.id;
-      // Clear any existing interval for this episode before starting a new one
       const existing = pollIntervals.current.get(episode.id);
       if (existing) clearInterval(existing);
       const interval = setInterval(async () => {
         attempts++;
         try {
-          // Use the feed ID from when polling started, not the current selection
           const eps = await api.podcastEpisodes(feedIdAtStart);
           const updated = eps.find((e) => e.id === episode.id);
           if (!updated) {
-            // Episode no longer exists in feed — stop polling
             setDownloadingIds((prev) => {
               const next = new Set(prev);
               next.delete(episode.id);
@@ -159,7 +174,6 @@ export default function PodcastsPage() {
             clearInterval(interval);
             pollIntervals.current.delete(episode.id);
             toast.success(`Downloaded "${episode.title}"`);
-            // Refresh episodes if we're still on this feed
             if (selectedFeedRef.current?.id === feedIdAtStart) {
               setEpisodes(eps);
             }
@@ -201,7 +215,6 @@ export default function PodcastsPage() {
     try {
       const { track_id } = await api.podcastEpisodeTrack(episodeId);
       const track = await api.track(track_id);
-      // Fetch the latest saved position from the backend (the episodes list may be stale)
       let startPositionSec = fallbackPositionSec;
       try {
         const posData = await api.podcastEpisodePosition(episodeId);
@@ -213,8 +226,6 @@ export default function PodcastsPage() {
       }
       await player.setPodcastEpisodeId(episodeId);
       player.play([track], 0);
-      // If resuming from a saved position, seek after a short delay
-      // (the audio element needs time to load the source)
       if (startPositionSec > 0) {
         setTimeout(() => {
           player.seek(startPositionSec);
@@ -225,9 +236,99 @@ export default function PodcastsPage() {
     }
   };
 
+  // Phase 2: Toggle auto-download for a feed
+  const handleToggleAutoDownload = async (feed: PodcastFeed) => {
+    try {
+      await api.updatePodcastFeed(feed.id, { auto_download: !feed.auto_download });
+      toast.success(feed.auto_download ? "Auto-download disabled" : "Auto-download enabled");
+      await loadFeeds();
+    } catch (e: any) {
+      toast.error("Failed to update feed: " + e.message);
+    }
+  };
+
+  // Phase 2: Mark episode as listened/unlistened
+  const handleMarkListened = async (episode: PodcastEpisode, listened: boolean) => {
+    try {
+      await api.savePodcastEpisodePosition(episode.id, listened ? episode.duration_sec : 0, listened);
+      toast.success(listened ? "Marked as listened" : "Marked as unlistened");
+      if (selectedFeed) {
+        await loadEpisodes(selectedFeed.id);
+      }
+    } catch (e: any) {
+      toast.error("Failed: " + e.message);
+    }
+  };
+
+  // Phase 2: Add to playlist
+  const handleAddToPlaylist = async (episode: PodcastEpisode, playlistId: number, playlistName: string) => {
+    try {
+      const { track_id } = await api.podcastEpisodeTrack(episode.id);
+      await api.addToPlaylist(playlistId, track_id);
+      toast.success(`Added to "${playlistName}"`);
+    } catch (e: any) {
+      toast.error("Failed to add to playlist: " + e.message);
+    }
+  };
+
+  // Phase 2: Sorting + filtering
+  const sortedFilteredEpisodes = useMemo(() => {
+    let result = [...episodes];
+
+    // Apply search filter
+    if (searchText.trim()) {
+      const q = searchText.toLowerCase();
+      result = result.filter((ep) =>
+        ep.title.toLowerCase().includes(q) ||
+        (ep.description && ep.description.toLowerCase().includes(q))
+      );
+    }
+
+    // Apply status filter
+    switch (filterMode) {
+      case "downloaded":
+        result = result.filter((ep) => ep.downloaded);
+        break;
+      case "not_downloaded":
+        result = result.filter((ep) => !ep.downloaded);
+        break;
+      case "listened":
+        result = result.filter((ep) => ep.listened);
+        break;
+      case "not_listened":
+        result = result.filter((ep) => !ep.listened);
+        break;
+    }
+
+    // Apply sorting
+    result.sort((a, b) => {
+      let cmp = 0;
+      switch (sortField) {
+        case "date":
+          cmp = a.pub_date - b.pub_date;
+          break;
+        case "duration":
+          cmp = a.duration_sec - b.duration_sec;
+          break;
+        case "title":
+          cmp = a.title.localeCompare(b.title);
+          break;
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+
+    return result;
+  }, [episodes, searchText, filterMode, sortField, sortDir]);
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${sec.toString().padStart(2, "0")}`;
+  };
+
   if (loading) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-4 p-4 md:p-6">
         <h1 className="text-2xl font-semibold">Podcasts</h1>
         <div className="flex items-center justify-center py-12">
           <Loader2 className="animate-spin text-accent" size={24} />
@@ -237,7 +338,7 @@ export default function PodcastsPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 p-4 md:p-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold flex items-center gap-2">
           <Rss className="text-accent" /> Podcasts
@@ -287,14 +388,14 @@ export default function PodcastsPage() {
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+        <div className={`grid grid-cols-1 ${isMobile ? "" : "lg:grid-cols-4"} gap-4`}>
           {/* Sidebar — Feed list */}
-          <div className="lg:col-span-1 space-y-2 max-h-[calc(100vh-12rem)] overflow-y-auto">
+          <div className={`${isMobile ? "flex overflow-x-auto gap-2 pb-2" : "lg:col-span-1 space-y-2"} max-h-[calc(100vh-12rem)] overflow-y-auto`}>
             {feeds && feeds.map((feed) => (
               <button
                 key={feed.id}
                 onClick={() => setSelectedFeed(feed)}
-                className={`w-full text-left rounded-lg p-3 border transition-colors ${
+                className={`${isMobile ? "min-w-[140px] shrink-0" : "w-full"} text-left rounded-lg p-3 border transition-colors ${
                   selectedFeed?.id === feed.id
                     ? "bg-panel border-accent"
                     : "bg-panel border-panel2 hover:border-accent/40"
@@ -319,6 +420,11 @@ export default function PodcastsPage() {
                     <p className="text-xs text-muted">
                       {feed.episode_count} episodes • {feed.downloaded_count} downloaded
                     </p>
+                    {feed.auto_download && (
+                      <p className="text-xs text-accent flex items-center gap-1 mt-0.5">
+                        <Download size={10} /> Auto-download
+                      </p>
+                    )}
                   </div>
                 </div>
               </button>
@@ -341,7 +447,7 @@ export default function PodcastsPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => handleDownloadFeed(selectedFeed.id)}
+                      onClick={() => confirmDownloadFeed(selectedFeed.id)}
                       className="p-2 rounded-md hover:bg-panel2 transition-colors text-accent"
                       title="Download all episodes"
                       aria-label="Download all episodes"
@@ -367,111 +473,181 @@ export default function PodcastsPage() {
                   </div>
                 </div>
 
-                {(!episodes || episodes.length === 0) ? (
+                {/* Phase 2: Auto-download toggle */}
+                <div className="flex items-center gap-3 bg-panel rounded-lg p-2 border border-panel2">
+                  <button
+                    onClick={() => handleToggleAutoDownload(selectedFeed)}
+                    className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-md transition-colors ${
+                      selectedFeed.auto_download
+                        ? "bg-accent/20 text-accent"
+                        : "bg-panel2 text-muted hover:text-text"
+                    }`}
+                    aria-label={selectedFeed.auto_download ? "Disable auto-download" : "Enable auto-download"}
+                  >
+                    <Download size={14} />
+                    Auto-download: {selectedFeed.auto_download ? "On" : "Off"}
+                  </button>
+                </div>
+
+                {/* Phase 2: Search, sort, filter bar */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="flex-1 min-w-[200px] relative">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+                    <input
+                      value={searchText}
+                      onChange={(e) => setSearchText(e.target.value)}
+                      placeholder="Search episodes..."
+                      className="w-full bg-panel border border-panel2 rounded-md pl-9 pr-3 py-2 text-sm outline-none focus:border-accent"
+                      aria-label="Search episodes"
+                    />
+                    {searchText && (
+                      <button
+                        onClick={() => setSearchText("")}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-text"
+                        aria-label="Clear search"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Sort button */}
+                  <div className="relative">
+                    <button
+                      onClick={() => { setShowSortMenu(!showSortMenu); setShowFilterMenu(false); }}
+                      className="flex items-center gap-1 px-3 py-2 bg-panel border border-panel2 rounded-md text-sm hover:border-accent/40"
+                      aria-label="Sort episodes"
+                    >
+                      <ArrowUpDown size={14} />
+                      <span className="hidden sm:inline">{sortField === "date" ? "Date" : sortField === "duration" ? "Duration" : "Title"}</span>
+                      <span className="text-xs text-muted">{sortDir === "asc" ? "↑" : "↓"}</span>
+                    </button>
+                    {showSortMenu && (
+                      <div className="absolute right-0 top-full z-20 mt-1 w-48 bg-panel border border-panel2 rounded-lg shadow-lg py-1">
+                        {(["date", "duration", "title"] as SortField[]).map((field) => (
+                          <button
+                            key={field}
+                            onClick={() => {
+                              if (sortField === field) {
+                                setSortDir(sortDir === "asc" ? "desc" : "asc");
+                              } else {
+                                setSortField(field);
+                                setSortDir(field === "date" ? "desc" : "asc");
+                              }
+                              setShowSortMenu(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center justify-between ${
+                              sortField === field ? "text-accent" : ""
+                            }`}
+                          >
+                            {field === "date" ? "Date" : field === "duration" ? "Duration" : "Title"}
+                            {sortField === field && <span className="text-xs">{sortDir === "asc" ? "↑" : "↓"}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Filter button */}
+                  <div className="relative">
+                    <button
+                      onClick={() => { setShowFilterMenu(!showFilterMenu); setShowSortMenu(false); }}
+                      className={`flex items-center gap-1 px-3 py-2 bg-panel border border-panel2 rounded-md text-sm hover:border-accent/40 ${
+                        filterMode !== "all" ? "border-accent/60 text-accent" : ""
+                      }`}
+                      aria-label="Filter episodes"
+                    >
+                      <Filter size={14} />
+                      <span className="hidden sm:inline">{filterMode === "all" ? "All" : filterMode === "downloaded" ? "Downloaded" : filterMode === "not_downloaded" ? "Not Downloaded" : filterMode === "listened" ? "Listened" : "Not Listened"}</span>
+                    </button>
+                    {showFilterMenu && (
+                      <div className="absolute right-0 top-full z-20 mt-1 w-48 bg-panel border border-panel2 rounded-lg shadow-lg py-1">
+                        {([
+                          { value: "all", label: "All" },
+                          { value: "downloaded", label: "Downloaded" },
+                          { value: "not_downloaded", label: "Not Downloaded" },
+                          { value: "listened", label: "Listened" },
+                          { value: "not_listened", label: "Not Listened" },
+                        ] as { value: FilterMode; label: string }[]).map((opt) => (
+                          <button
+                            key={opt.value}
+                            onClick={() => { setFilterMode(opt.value); setShowFilterMenu(false); }}
+                            className={`w-full text-left px-3 py-2 text-sm hover:bg-panel2 ${
+                              filterMode === opt.value ? "text-accent" : ""
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {sortedFilteredEpisodes.length === 0 ? (
                   <div className="bg-panel rounded-lg p-8 border border-panel2 text-center">
-                    <p className="text-muted">No episodes found. Try syncing the feed.</p>
+                    <p className="text-muted">
+                      {searchText || filterMode !== "all"
+                        ? "No episodes match your search/filter."
+                        : "No episodes found. Try syncing the feed."}
+                    </p>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {episodes && episodes.map((ep) => {
+                    {sortedFilteredEpisodes.map((ep) => {
                       const hasProgress = ep.playback_position_sec > 0 && !ep.listened;
                       const progressPct = ep.duration_sec > 0
                         ? Math.min(100, Math.round((ep.playback_position_sec / ep.duration_sec) * 100))
                         : 0;
-                      const formatTime = (s: number) => {
-                        const m = Math.floor(s / 60);
-                        const sec = s % 60;
-                        return `${m}:${sec.toString().padStart(2, '0')}`;
-                      };
                       return (
-                      <div
-                        key={ep.id}
-                        className="bg-panel rounded-lg p-3 border border-panel2 hover:border-accent/30 transition-colors"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <h3 className="text-sm font-medium truncate">{ep.title}</h3>
-                              {ep.listened && (
-                                <span className="text-xs text-muted shrink-0">✓ Listened</span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 mt-1">
-                              {ep.pub_date > 0 && (
-                                <span className="text-xs text-muted">
-                                  {new Date(ep.pub_date * 1000).toLocaleDateString()}
-                                </span>
-                              )}
-                              {ep.duration_sec > 0 && (
-                                <span className="text-xs text-muted">
-                                  {formatTime(ep.duration_sec)}
-                                </span>
-                              )}
-                              {ep.downloaded && (
-                                <span className="text-xs text-green-400 flex items-center gap-1">
-                                  <Check size={10} /> Downloaded
-                                </span>
-                              )}
-                              {ep.download_error && !ep.downloaded && (
-                                <span className="text-xs text-red-400 flex items-center gap-1" title={ep.download_error}>
-                                  Error
-                                </span>
-                              )}
-                            </div>
-                            {/* Progress bar for partially listened episodes */}
-                            {hasProgress && progressPct > 0 && (
-                              <div className="mt-2">
-                                <div className="flex items-center gap-2">
-                                  <div className="flex-1 h-1 bg-panel2 rounded-full overflow-hidden" role="progressbar" aria-valuenow={progressPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Playback progress: ${progressPct}%`}>
-                                    <div
-                                      className="h-full bg-accent rounded-full transition-all"
-                                      style={{ width: `${progressPct}%` }}
-                                    />
-                                  </div>
-                                  <span className="text-xs text-muted shrink-0">
-                                    {formatTime(ep.playback_position_sec)} / {formatTime(ep.duration_sec)}
-                                  </span>
-                                </div>
-                              </div>
-                            )}
-                            {ep.description && (
-                              <p className="text-xs text-muted mt-1 line-clamp-2">{ep.description}</p>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1">
-                            {ep.downloaded && ep.file_path ? (
-                              <button
-                                onClick={() => handlePlayEpisode(Number(ep.id), ep.title, hasProgress ? ep.playback_position_sec : 0)}
-                                className="p-2 rounded-md hover:bg-panel2 transition-colors text-accent"
-                                title={hasProgress ? `Resume from ${formatTime(ep.playback_position_sec)}` : "Play"}
-                                aria-label={hasProgress ? `Resume "${ep.title}" from ${formatTime(ep.playback_position_sec)}` : `Play "${ep.title}"`}
-                              >
-                                <Play size={14} />
-                              </button>
-                            ) : (
-                              <button
-                                onClick={() => handleDownloadEpisode(ep)}
-                                disabled={downloadingIds.has(ep.id)}
-                                className="p-2 rounded-md hover:bg-panel2 transition-colors disabled:opacity-50"
-                                title="Download"
-                                aria-label={`Download "${ep.title}"`}
-                              >
-                                {downloadingIds.has(ep.id) ? (
-                                  <Loader2 size={14} className="animate-spin" />
-                                ) : (
-                                  <Download size={14} />
-                                )}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                        <EpisodeCard
+                          key={ep.id}
+                          episode={ep}
+                          hasProgress={hasProgress}
+                          progressPct={progressPct}
+                          formatTime={formatTime}
+                          downloading={downloadingIds.has(ep.id)}
+                          onPlay={() => handlePlayEpisode(Number(ep.id), ep.title, hasProgress ? ep.playback_position_sec : 0)}
+                          onDownload={() => handleDownloadEpisode(ep)}
+                          onMarkListened={(listened) => handleMarkListened(ep, listened)}
+                          onAddToPlaylist={(playlistId, playlistName) => handleAddToPlaylist(ep, playlistId, playlistName)}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Download confirmation modal */}
+      {showDownloadConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-panel rounded-lg border border-panel2 w-full max-w-sm shadow-xl p-4 space-y-3">
+            <h3 className="text-lg font-semibold">Download all episodes?</h3>
+            <p className="text-sm text-muted">
+              This will download all episodes for "{feeds.find((f) => f.id === feedToDownload)?.title}". For feeds with many episodes this may take a while and use significant storage.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => { setShowDownloadConfirm(false); setFeedToDownload(null); }}
+                className="px-4 py-2 bg-panel2 rounded-md text-sm hover:bg-panel2/70"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (feedToDownload) handleDownloadFeed(feedToDownload);
+                  setShowDownloadConfirm(false);
+                  setFeedToDownload(null);
+                }}
+                className="px-4 py-2 bg-accent text-bg rounded-md text-sm font-medium"
+              >
+                Download All
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -481,6 +657,7 @@ export default function PodcastsPage() {
         <AddPodcastModal
           onClose={() => setShowAddModal(false)}
           onSubscribe={async (url) => {
+            setSubscribing(true);
             try {
               await api.podcastSubscribe(url);
               toast.success("Subscribed!");
@@ -488,10 +665,214 @@ export default function PodcastsPage() {
               await loadFeeds();
             } catch (e: any) {
               toast.error("Failed: " + e.message);
+            } finally {
+              setSubscribing(false);
             }
           }}
+          subscribing={subscribing}
         />
       )}
+    </div>
+  );
+}
+
+// ----- Episode Card Component -----
+
+function EpisodeCard({
+  episode: ep,
+  hasProgress,
+  progressPct,
+  formatTime,
+  downloading,
+  onPlay,
+  onDownload,
+  onMarkListened,
+  onAddToPlaylist,
+}: {
+  episode: PodcastEpisode;
+  hasProgress: boolean;
+  progressPct: number;
+  formatTime: (s: number) => string;
+  downloading: boolean;
+  onPlay: () => void;
+  onDownload: () => void;
+  onMarkListened: (listened: boolean) => void;
+  onAddToPlaylist: (playlistId: number, playlistName: string) => void;
+}) {
+  const [showMenu, setShowMenu] = useState(false);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [menuLoaded, setMenuLoaded] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const toast = useToast();
+
+  // Close menu on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMenu(false);
+      }
+    }
+    if (showMenu) {
+      document.addEventListener("mousedown", handleClick);
+      return () => document.removeEventListener("mousedown", handleClick);
+    }
+  }, [showMenu]);
+
+  const handleOpenMenu = async () => {
+    setShowMenu(true);
+    if (!menuLoaded) {
+      try {
+        const pls = await api.playlists();
+        setPlaylists(pls);
+        setMenuLoaded(true);
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  return (
+    <div
+      className="bg-panel rounded-lg p-3 border border-panel2 hover:border-accent/30 transition-colors"
+      tabIndex={0}
+      role="article"
+      aria-label={`Episode: ${ep.title}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-medium truncate">{ep.title}</h3>
+            {ep.listened && (
+              <span className="text-xs text-muted shrink-0 flex items-center gap-1">
+                <Check size={10} /> Listened
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            {ep.pub_date > 0 && (
+              <span className="text-xs text-muted">
+                {new Date(ep.pub_date * 1000).toLocaleDateString()}
+              </span>
+            )}
+            {ep.duration_sec > 0 && (
+              <span className="text-xs text-muted">
+                {formatTime(ep.duration_sec)}
+              </span>
+            )}
+            {ep.downloaded && (
+              <span className="text-xs text-green-400 flex items-center gap-1">
+                <Check size={10} /> Downloaded
+              </span>
+            )}
+            {ep.download_error && !ep.downloaded && (
+              <span className="text-xs text-red-400 flex items-center gap-1" title={ep.download_error}>
+                Error
+              </span>
+            )}
+          </div>
+          {/* Progress bar for partially listened episodes */}
+          {hasProgress && progressPct > 0 && (
+            <div className="mt-2">
+              <div className="flex items-center gap-2">
+                <div className="flex-1 h-1 bg-panel2 rounded-full overflow-hidden" role="progressbar" aria-valuenow={progressPct} aria-valuemin={0} aria-valuemax={100} aria-label={`Playback progress: ${progressPct}%`}>
+                  <div
+                    className="h-full bg-accent rounded-full transition-all"
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+                <span className="text-xs text-muted shrink-0">
+                  {formatTime(ep.playback_position_sec)} / {formatTime(ep.duration_sec)}
+                </span>
+              </div>
+            </div>
+          )}
+          {ep.description && (
+            <p className="text-xs text-muted mt-1 line-clamp-2">{ep.description}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {ep.downloaded && ep.file_path ? (
+            <button
+              onClick={onPlay}
+              className="p-2 rounded-md hover:bg-panel2 transition-colors text-accent"
+              title={hasProgress ? `Resume from ${formatTime(ep.playback_position_sec)}` : "Play"}
+              aria-label={hasProgress ? `Resume "${ep.title}" from ${formatTime(ep.playback_position_sec)}` : `Play "${ep.title}"`}
+            >
+              <Play size={14} />
+            </button>
+          ) : (
+            <button
+              onClick={onDownload}
+              disabled={downloading}
+              className="p-2 rounded-md hover:bg-panel2 transition-colors disabled:opacity-50"
+              title="Download"
+              aria-label={`Download "${ep.title}"`}
+            >
+              {downloading ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Download size={14} />
+              )}
+            </button>
+          )}
+          {/* Context menu button */}
+          <div ref={menuRef} className="relative">
+            <button
+              onClick={handleOpenMenu}
+              className="p-2 rounded-md hover:bg-panel2 transition-colors text-muted hover:text-text"
+              aria-label={`Actions for "${ep.title}"`}
+              aria-expanded={showMenu}
+            >
+              <MoreHorizontal size={14} />
+            </button>
+            {showMenu && (
+              <div className="absolute right-0 top-full z-20 mt-1 w-56 bg-panel border border-panel2 rounded-lg shadow-lg py-1 max-h-72 overflow-y-auto">
+                {/* Mark listened/unlistened */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMarkListened(!ep.listened);
+                    setShowMenu(false);
+                  }}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2"
+                >
+                  {ep.listened ? <EyeOff size={14} /> : <Eye size={14} />}
+                  {ep.listened ? "Mark as unlistened" : "Mark as listened"}
+                </button>
+
+                {/* Add to playlist section */}
+                {ep.downloaded && (
+                  <>
+                    <div className="px-3 py-1.5 text-xs text-muted uppercase tracking-wide border-t border-panel2">
+                      Add to playlist
+                    </div>
+                    {menuLoaded && playlists.length === 0 ? (
+                      <div className="px-3 py-2 text-sm text-muted">
+                        No playlists yet.
+                      </div>
+                    ) : (
+                      playlists.map((pl) => (
+                        <button
+                          key={pl.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onAddToPlaylist(pl.id, pl.name);
+                            setShowMenu(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-panel2 flex items-center gap-2"
+                        >
+                          <ListMusic size={14} className="text-muted" />
+                          <span className="truncate">{pl.name}</span>
+                        </button>
+                      ))
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -501,12 +882,13 @@ export default function PodcastsPage() {
 function AddPodcastModal({
   onClose,
   onSubscribe,
+  subscribing,
 }: {
   onClose: () => void;
   onSubscribe: (url: string) => Promise<void>;
+  subscribing: boolean;
 }) {
   const [url, setUrl] = useState("");
-  const [subscribing, setSubscribing] = useState(false);
   const [error, setError] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
   const firstFocusableRef = useRef<HTMLInputElement>(null);
@@ -514,7 +896,6 @@ function AddPodcastModal({
 
   // Focus trap
   useEffect(() => {
-    // Focus the input on mount
     firstFocusableRef.current?.focus();
 
     function handleKeyDown(e: KeyboardEvent) {
@@ -548,14 +929,11 @@ function AddPodcastModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!url.trim()) return;
-    setSubscribing(true);
     setError("");
     try {
       await onSubscribe(url.trim());
     } catch (e: any) {
       setError(e.message || "Failed to subscribe");
-    } finally {
-      setSubscribing(false);
     }
   };
 

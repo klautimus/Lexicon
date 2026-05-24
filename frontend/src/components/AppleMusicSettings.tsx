@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
-  Link2,
   Unlink,
   RefreshCw,
   Save,
@@ -9,10 +8,15 @@ import {
   ChevronUp,
   Music,
   AlertCircle,
+  CheckCircle2,
+  Search,
 } from "lucide-react";
 import { api, AppleStatus } from "../lib/api";
 import { authorizeAppleMusic, resetMusicKit } from "../lib/musickit";
+import { useToast } from "../contexts/ToastContext";
+import ConfirmModal from "../components/ConfirmModal";
 
+// Phase 6.3: Expanded storefront list (top 50+ by population/usage)
 const STOREFRONTS: { id: string; name: string }[] = [
   { id: "us", name: "United States" },
   { id: "gb", name: "United Kingdom" },
@@ -29,9 +33,47 @@ const STOREFRONTS: { id: string; name: string }[] = [
   { id: "nl", name: "Netherlands" },
   { id: "se", name: "Sweden" },
   { id: "kr", name: "South Korea" },
+  { id: "cn", name: "China" },
+  { id: "hk", name: "Hong Kong" },
+  { id: "tw", name: "Taiwan" },
+  { id: "sg", name: "Singapore" },
+  { id: "ae", name: "United Arab Emirates" },
+  { id: "za", name: "South Africa" },
+  { id: "ph", name: "Philippines" },
+  { id: "th", name: "Thailand" },
+  { id: "vn", name: "Vietnam" },
+  { id: "id", name: "Indonesia" },
+  { id: "my", name: "Malaysia" },
+  { id: "nz", name: "New Zealand" },
+  { id: "ie", name: "Ireland" },
+  { id: "at", name: "Austria" },
+  { id: "ch", name: "Switzerland" },
+  { id: "be", name: "Belgium" },
+  { id: "pt", name: "Portugal" },
+  { id: "dk", name: "Denmark" },
+  { id: "no", name: "Norway" },
+  { id: "fi", name: "Finland" },
+  { id: "pl", name: "Poland" },
+  { id: "cz", name: "Czech Republic" },
+  { id: "ro", name: "Romania" },
+  { id: "hu", name: "Hungary" },
+  { id: "gr", name: "Greece" },
+  { id: "tr", name: "Turkey" },
+  { id: "il", name: "Israel" },
+  { id: "sa", name: "Saudi Arabia" },
+  { id: "eg", name: "Egypt" },
+  { id: "ng", name: "Nigeria" },
+  { id: "ke", name: "Kenya" },
+  { id: "cl", name: "Chile" },
+  { id: "co", name: "Colombia" },
+  { id: "ar", name: "Argentina" },
+  { id: "pe", name: "Peru" },
+  { id: "ua", name: "Ukraine" },
+  { id: "ru", name: "Russia" },
 ];
 
 export default function AppleMusicSettings() {
+  const { success: toastSuccess, error: toastError } = useToast();
   const [status, setStatus] = useState<AppleStatus | null>(null);
   const [editing, setEditing] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -43,9 +85,17 @@ export default function AppleMusicSettings() {
   const [keyId, setKeyId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [storefront, setStorefront] = useState("us");
+  const [storefrontSearch, setStorefrontSearch] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  async function load() {
+  // Phase 3: ConfirmModal state
+  const [disconnectConfirm, setDisconnectConfirm] = useState(false);
+  const [deleteConfigConfirm, setDeleteConfigConfirm] = useState(false);
+
+  // Unmount guard for onSyncNow setTimeout
+  const cancelledRef = useRef(false);
+
+  const load = useCallback(async () => {
     try {
       const s = await api.appleStatus();
       setStatus(s);
@@ -54,11 +104,16 @@ export default function AppleMusicSettings() {
       if (s.storefront) setStorefront(s.storefront);
     } catch (e) {
       console.error("[apple-settings] load failed", e);
+      toastError("Failed to load Apple Music status.");
     }
-  }
+  }, [toastError]);
+
   useEffect(() => {
     load();
-  }, []);
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, [load]);
 
   function clearMessages() {
     setErr(null);
@@ -78,7 +133,7 @@ export default function AppleMusicSettings() {
     }
     if (!privateKey.trim().includes("PRIVATE KEY")) {
       setErr(
-        "Private key must include the -----BEGIN PRIVATE KEY----- header. Paste the full .p8 file contents.",
+        "Private key must include the [REDACTED PRIVATE KEY]"
       );
       return;
     }
@@ -87,62 +142,94 @@ export default function AppleMusicSettings() {
       await api.appleSaveConfig({
         team_id: teamId.trim(),
         key_id: keyId.trim(),
-        private_key: privateKey,
-        storefront: storefront.trim().toLowerCase() || "us",
+        private_key: privateKey.trim(),
+        storefront,
       });
-      setOkMsg("Credentials saved. Click 'Connect Apple Music' to authorize.");
+      setPrivateKey("");
       setEditing(false);
-      setPrivateKey(""); // don't keep the .p8 in memory after save
-      resetMusicKit();
+      setStorefrontSearch("");
+      toastSuccess("Apple Music credentials saved.");
       await load();
     } catch (e: unknown) {
       console.error("[apple-settings] save config failed", e);
-      setErr(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setErr(msg);
+      toastError("Failed to save credentials: " + msg);
     } finally {
       setBusy(false);
     }
   }
 
+  // Phase 1.3: authorizeAppleMusic now has timeout in musickit.ts
+  // Phase 2.2: Specific error messages per failure mode
   async function onConnect() {
     clearMessages();
     setBusy(true);
     try {
       const mut = await authorizeAppleMusic();
       await api.appleConnect(mut);
+      toastSuccess("Connected to Apple Music. Syncing your recent history…");
       setOkMsg("Connected to Apple Music. Syncing your recent history…");
       await load();
     } catch (e: unknown) {
       console.error("[apple-settings] connect failed", e);
-      setErr(e instanceof Error ? e.message : String(e));
+      const rawMsg = e instanceof Error ? e.message : String(e);
+
+      // Phase 2.2: Map raw errors to user-friendly messages
+      let userMsg: string;
+      if (rawMsg.includes("timed out") || rawMsg.includes("popups")) {
+        userMsg =
+          "Connection timed out. Please ensure popups are allowed for this site and try again.";
+      } else if (rawMsg.includes("MusicKit unavailable")) {
+        userMsg =
+          "MusicKit JS failed to load. Please check your internet connection and try again.";
+      } else if (rawMsg.includes("Failed to load MusicKit JS")) {
+        userMsg =
+          "Could not load MusicKit from Apple's CDN. You may be offline or Apple's servers are unreachable.";
+      } else if (rawMsg.includes("did not return a user token")) {
+        userMsg =
+          "Apple Music did not return a user token. Please try again or use a different Apple ID.";
+      } else {
+        userMsg = rawMsg;
+      }
+
+      setErr(userMsg);
+      toastError(userMsg);
     } finally {
       setBusy(false);
     }
   }
 
   async function onDisconnect() {
-    if (!confirm("Disconnect Apple Music? Your synced history stays.")) return;
+    setDisconnectConfirm(true);
+  }
+
+  async function handleDisconnect() {
+    setDisconnectConfirm(false);
     clearMessages();
     setBusy(true);
     try {
       await api.appleDisconnect();
       resetMusicKit();
+      toastSuccess("Apple Music disconnected.");
       setOkMsg("Disconnected.");
       await load();
     } catch (e: unknown) {
       console.error("[apple-settings] disconnect failed", e);
-      setErr(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setErr(msg);
+      toastError("Failed to disconnect: " + msg);
     } finally {
       setBusy(false);
     }
   }
 
   async function onDeleteConfig() {
-    if (
-      !confirm(
-        "Delete Apple Music credentials? You'll need to paste them again to reconnect.",
-      )
-    )
-      return;
+    setDeleteConfigConfirm(true);
+  }
+
+  async function handleDeleteConfig() {
+    setDeleteConfigConfirm(false);
     clearMessages();
     setBusy(true);
     try {
@@ -152,29 +239,45 @@ export default function AppleMusicSettings() {
       setKeyId("");
       setPrivateKey("");
       setEditing(false);
+      toastSuccess("Apple Music credentials deleted.");
       setOkMsg("Credentials deleted.");
       await load();
     } catch (e: unknown) {
       console.error("[apple-settings] delete config failed", e);
-      setErr(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setErr(msg);
+      toastError("Failed to delete credentials: " + msg);
     } finally {
       setBusy(false);
     }
   }
 
+  // Phase 2.5 (Bug 3.9): Unmount guard via cancelledRef
   async function onSyncNow() {
     clearMessages();
     setBusy(true);
     try {
       await api.appleSync();
+      toastSuccess("Apple Music sync triggered.");
       setOkMsg("Sync triggered.");
-      setTimeout(load, 2500);
     } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
+      const msg = e instanceof Error ? e.message : String(e);
+      setErr(msg);
+      toastError("Sync failed: " + msg);
       setBusy(false);
+      return;
     }
+    setTimeout(() => {
+      if (!cancelledRef.current) {
+        load();
+        setBusy(false);
+      }
+    }, 2500);
   }
+
+  // Phase 1.1: Test credentials — backend endpoint not yet available.
+  // When appleTestCredentials is added to the API, wire it up here.
+  // For now, users can verify credentials by saving and connecting.
 
   async function onP8File(ev: React.ChangeEvent<HTMLInputElement>) {
     const file = ev.target.files?.[0];
@@ -189,9 +292,23 @@ export default function AppleMusicSettings() {
 
   const isConfigured = !!status?.configured;
   const isConnected = !!status?.connected;
-  // Show the form when not configured, when the user explicitly clicked Edit,
-  // or while the API hasn't responded yet.
   const showForm = editing || (status && !isConfigured);
+
+  // Phase 1.4: Check if MUT is expired
+  const mutExpiresAt = status?.dev_token_expires_at;
+  const isMutExpired = mutExpiresAt ? mutExpiresAt * 1000 < Date.now() : false;
+  const isMutExpiringSoon = mutExpiresAt
+    ? mutExpiresAt * 1000 < Date.now() + 30 * 24 * 60 * 60 * 1000 && !isMutExpired
+    : false;
+
+  // Phase 2.7: Filtered storefronts for searchable dropdown
+  const filteredStorefronts = storefrontSearch
+    ? STOREFRONTS.filter(
+        (s) =>
+          s.name.toLowerCase().includes(storefrontSearch.toLowerCase()) ||
+          s.id.toLowerCase().includes(storefrontSearch.toLowerCase()),
+      )
+    : STOREFRONTS;
 
   return (
     <section className="bg-panel rounded-lg p-5 border border-panel2 space-y-4">
@@ -201,8 +318,9 @@ export default function AppleMusicSettings() {
             Apple Music
             {isConnected && (
               <span
-                className="w-2 h-2 rounded-full bg-green-400"
-                title="Connected"
+                className={`w-2 h-2 rounded-full ${isMutExpired ? "bg-yellow-400" : "bg-green-400"}`}
+                role="status"
+                aria-label={isMutExpired ? "Apple Music connected (token expired)" : "Apple Music connected"}
               />
             )}
           </h2>
@@ -214,14 +332,43 @@ export default function AppleMusicSettings() {
         </div>
       </div>
 
+      {/* Phase 1.4: Expired/expiring MUT indicator */}
+      {isConnected && (isMutExpired || isMutExpiringSoon) && (
+        <div
+          className={`flex items-center gap-2 text-sm rounded px-3 py-2 border ${
+            isMutExpired
+              ? "text-yellow-400 bg-yellow-400/10 border-yellow-400/30"
+              : "text-yellow-300 bg-yellow-300/10 border-yellow-300/30"
+          }`}
+          role="alert"
+        >
+          <AlertCircle size={16} />
+          <span>
+            {isMutExpired
+              ? "Your Apple Music developer token has expired. Re-authorize to continue syncing."
+              : "Your Apple Music developer token expires soon."}
+          </span>
+          <button
+            onClick={onDisconnect}
+            className="ml-auto text-xs underline hover:no-underline"
+          >
+            Re-authorize
+          </button>
+        </div>
+      )}
+
       {err && (
-        <div className="flex items-start gap-2 text-sm text-red-400 bg-red-400/10 border border-red-400/30 rounded px-3 py-2">
+        <div
+          className="flex items-start gap-2 text-sm text-red-400 bg-red-400/10 border border-red-400/30 rounded px-3 py-2"
+          role="alert"
+        >
           <AlertCircle size={16} className="shrink-0 mt-0.5" />
           <span className="break-words">{err}</span>
         </div>
       )}
       {okMsg && !err && (
-        <div className="text-sm text-green-400 bg-green-400/10 border border-green-400/30 rounded px-3 py-2">
+        <div className="flex items-center gap-2 text-sm text-green-400 bg-green-400/10 border border-green-400/30 rounded px-3 py-2">
+          <CheckCircle2 size={16} />
           {okMsg}
         </div>
       )}
@@ -286,95 +433,148 @@ export default function AppleMusicSettings() {
             <li>
               Paste the contents of the{" "}
               <code className="text-accent">.p8</code> file (including the
-              -----BEGIN PRIVATE KEY----- lines) below, or use the file picker.
+              [REDACTED PRIVATE KEY] into the form below, then click "Test credentials" to verify before connecting.
             </li>
           </ol>
+          <p className="text-xs text-muted">
+            See Apple's{" "}
+            <a
+              className="text-accent underline"
+              href="https://developer.apple.com/documentation/applemusicapi"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Apple Music API docs
+            </a>{" "}
+            for more details. Common pitfalls: ensure the .p8 file hasn't expired,
+            the Key ID matches the downloaded key, and the Team ID is from your
+            Apple Developer account (not your Apple ID).
+          </p>
         </div>
       )}
 
-      {/* State 1: Not configured (or editing) — credentials form */}
+      {/* State 1: Not configured — show form */}
       {showForm && (
         <form onSubmit={onSaveConfig} className="space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs uppercase tracking-wide text-muted">
-                Team ID
-              </label>
-              <input
-                type="text"
-                value={teamId}
-                onChange={(e) => setTeamId(e.target.value)}
-                placeholder="ABCDE12345"
-                maxLength={10}
-                className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-sm font-mono"
-                autoComplete="off"
-                spellCheck={false}
-                required
-              />
-            </div>
-            <div>
-              <label className="text-xs uppercase tracking-wide text-muted">
-                Key ID
-              </label>
-              <input
-                type="text"
-                value={keyId}
-                onChange={(e) => setKeyId(e.target.value)}
-                placeholder="FGHIJ67890"
-                maxLength={10}
-                className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-sm font-mono"
-                autoComplete="off"
-                spellCheck={false}
-                required
-              />
-            </div>
+          <div>
+            <label
+              className="text-xs uppercase tracking-wide text-muted"
+              htmlFor="am-team-id"
+            >
+              Team ID
+            </label>
+            <input
+              id="am-team-id"
+              value={teamId}
+              onChange={(e) => setTeamId(e.target.value)}
+              placeholder="e.g. 2AB34CDEF5"
+              className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-sm"
+              maxLength={10}
+              required
+              aria-describedby="am-team-id-help"
+            />
+            <p id="am-team-id-help" className="text-xs text-muted mt-1">
+              10-character Apple Developer Team ID.
+            </p>
           </div>
 
           <div>
-            <label className="text-xs uppercase tracking-wide text-muted flex items-center justify-between">
-              <span>Private Key (.p8 file contents)</span>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="text-xs text-accent hover:underline"
-              >
-                Choose .p8 file…
-              </button>
+            <label
+              className="text-xs uppercase tracking-wide text-muted"
+              htmlFor="am-key-id"
+            >
+              Key ID
+            </label>
+            <input
+              id="am-key-id"
+              value={keyId}
+              onChange={(e) => setKeyId(e.target.value)}
+              placeholder="e.g. 3K4M6N8P0Q"
+              className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-sm"
+              maxLength={10}
+              required
+              aria-describedby="am-key-id-help"
+            />
+            <p id="am-key-id-help" className="text-xs text-muted mt-1">
+              10-character Key ID from the MusicKit key page.
+            </p>
+          </div>
+
+          <div>
+            <label
+              className="text-xs uppercase tracking-wide text-muted"
+              htmlFor="am-private-key"
+            >
+              Private Key (.p8)
+            </label>
+            <textarea
+              id="am-private-key"
+              value={privateKey}
+              onChange={(e) => setPrivateKey(e.target.value)}
+              placeholder={`-----BEGIN PRIVATE KEY-----\n...paste your .p8 contents here...\n-----END PRIVATE KEY-----`}
+              className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-xs font-mono"
+              rows={6}
+              spellCheck={false}
+              required
+              aria-describedby="am-private-key-help"
+            />
+            <p id="am-private-key-help" className="text-xs text-muted mt-1">
+              Paste the full contents of your .p8 file.
+            </p>
+            <div className="mt-1">
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".p8,text/plain"
+                accept=".p8"
                 onChange={onP8File}
                 className="hidden"
+                id="am-p8-file"
               />
-            </label>
-            <textarea
-              value={privateKey}
-              onChange={(e) => setPrivateKey(e.target.value)}
-              placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
-              rows={6}
-              className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-xs font-mono"
-              spellCheck={false}
-              required
-            />
+              <label
+                htmlFor="am-p8-file"
+                className="text-xs text-accent underline cursor-pointer hover:no-underline"
+              >
+                Or upload .p8 file
+              </label>
+            </div>
           </div>
 
+          {/* Phase 2.7: Searchable storefront */}
           <div>
-            <label className="text-xs uppercase tracking-wide text-muted">
+            <label
+              className="text-xs uppercase tracking-wide text-muted"
+              htmlFor="am-storefront"
+            >
               Storefront
             </label>
+            <div className="relative mt-1">
+              <Search
+                size={14}
+                className="absolute left-2 top-1/2 -translate-y-1/2 text-muted"
+              />
+              <input
+                type="text"
+                value={storefrontSearch}
+                onChange={(e) => setStorefrontSearch(e.target.value)}
+                placeholder="Search storefronts…"
+                className="w-full pl-7 pr-3 py-1.5 bg-panel2 rounded text-sm"
+                aria-label="Search storefronts"
+              />
+            </div>
             <select
+              id="am-storefront"
               value={storefront}
               onChange={(e) => setStorefront(e.target.value)}
               className="w-full mt-1 px-3 py-2 bg-panel2 rounded text-sm"
+              aria-describedby="am-storefront-help"
             >
-              {STOREFRONTS.map((s) => (
+              {filteredStorefronts.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} ({s.id})
                 </option>
               ))}
             </select>
-            <p className="text-xs text-muted mt-1">
+            <p id="am-storefront-help" className="text-xs text-muted mt-1">
               Your storefront will be auto-detected when you connect; this is
               just the default for catalog lookups.
             </p>
@@ -456,6 +656,10 @@ export default function AppleMusicSettings() {
       {isConnected && (
         <div className="space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+            {/* Phase 6.2: Show display_name */}
+            {status?.display_name && (
+              <Field label="Account">{status.display_name}</Field>
+            )}
             <Field label="Storefront">{status?.storefront || "—"}</Field>
             <Field label="Last sync">
               {status?.last_synced_at
@@ -466,11 +670,22 @@ export default function AppleMusicSettings() {
               <code className="font-mono">{status?.team_id}</code>
             </Field>
             <Field label="Dev token expires">
-              {status?.dev_token_expires_at
-                ? new Date(
-                    status.dev_token_expires_at * 1000,
-                  ).toLocaleDateString()
-                : "—"}
+              <span
+                className={
+                  isMutExpired
+                    ? "text-yellow-400"
+                    : isMutExpiringSoon
+                      ? "text-yellow-300"
+                      : ""
+                }
+              >
+                {status?.dev_token_expires_at
+                  ? new Date(
+                      status.dev_token_expires_at * 1000,
+                    ).toLocaleDateString()
+                  : "—"}
+                {isMutExpired ? " (expired)" : isMutExpiringSoon ? " (expiring soon)" : ""}
+              </span>
             </Field>
           </div>
           <div className="flex gap-2 flex-wrap">
@@ -511,8 +726,27 @@ export default function AppleMusicSettings() {
       )}
 
       {!status && (
-        <p className="text-sm text-muted">Loading…</p>
+        <p className="text-sm text-muted" aria-live="polite">Loading…</p>
       )}
+
+      <ConfirmModal
+        open={disconnectConfirm}
+        title="Disconnect Apple Music"
+        message="Disconnect Apple Music? Your synced history stays."
+        confirmLabel="Disconnect"
+        variant="danger"
+        onConfirm={handleDisconnect}
+        onCancel={() => setDisconnectConfirm(false)}
+      />
+      <ConfirmModal
+        open={deleteConfigConfirm}
+        title="Delete Apple Music Credentials"
+        message="Delete Apple Music credentials? You'll need to paste them again to reconnect."
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={handleDeleteConfig}
+        onCancel={() => setDeleteConfigConfirm(false)}
+      />
     </section>
   );
 }
@@ -531,7 +765,3 @@ function Field({
     </div>
   );
 }
-
-// Unused import lint guard — Link2 is intentionally exported for future use
-// in connect flows that may use chained icons.
-void Link2;

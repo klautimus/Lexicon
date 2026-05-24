@@ -35,18 +35,19 @@ type Track struct {
 	SpotifyID         string  `json:"spotify_id,omitempty"`
 	ExternalURL       string  `json:"external_url,omitempty"`
 	AppleID           string  `json:"apple_id,omitempty"`
+	FileSHA256        string  `json:"file_sha256,omitempty"`
 	UserID            int64   `json:"user_id,omitempty"`
 }
 
 // TrackCols matches the actual tracks table schema exactly.
 // Column order must match ScanTrack's Scan argument order.
 // Uses raw column names — NULLs are handled by sql.NullString in ScanTrack.
-const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url, apple_id, user_id`
+const TrackCols = `id, path, title, artist, album_artist, album, track_no, disc_no, year, genre, duration_sec, media_kind, mime, size_bytes, cover_path, added_at, mtime, loudness_integrated, loudness_true_peak, loudness_range, spotify_id, external_url, apple_id, file_sha256, user_id`
 
 // ExpectedTrackCols is the exact number of columns in TrackCols.
 // Must match the dest argument count in ScanTrack and the columns in
 // TrackColsAliased. Edit all three when adding or removing columns.
-const ExpectedTrackCols = 24
+const ExpectedTrackCols = 25
 
 // TrackColsAliased returns TrackCols with a table prefix for JOIN queries
 // where column names might be ambiguous (e.g., tracks_fts has title, artist, etc.).
@@ -57,7 +58,7 @@ func TrackColsAliased(alias string) string {
 		"duration_sec", "media_kind", "mime",
 		"size_bytes", "cover_path", "added_at", "mtime",
 		"loudness_integrated", "loudness_true_peak", "loudness_range",
-		"spotify_id", "external_url", "apple_id", "user_id",
+		"spotify_id", "external_url", "apple_id", "file_sha256", "user_id",
 	}
 	for i, c := range cols {
 		cols[i] = alias + "." + c
@@ -72,7 +73,7 @@ func ScanTrack(s interface {
 }) (Track, error) {
 	var t Track
 	var path, title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
-	var spotifyID, externalURL, appleID sql.NullString
+	var spotifyID, externalURL, appleID, fileSHA256 sql.NullString
 	var trackNo, discNo, year, durationSec sql.NullInt64
 	var sizeBytes, addedAt, mtime sql.NullInt64
 	var coverPath sql.NullString
@@ -86,7 +87,7 @@ func ScanTrack(s interface {
 		&durationSec, &mediaKind, &mime,
 		&sizeBytes, &coverPath, &addedAt, &mtime,
 		&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
-		&spotifyID, &externalURL, &appleID,
+		&spotifyID, &externalURL, &appleID, &fileSHA256,
 		&userID,
 	}
 
@@ -164,6 +165,9 @@ func ScanTrack(s interface {
 	}
 	if appleID.Valid {
 		t.AppleID = appleID.String
+	}
+	if fileSHA256.Valid {
+		t.FileSHA256 = fileSHA256.String
 	}
 	if userID.Valid {
 		t.UserID = userID.Int64

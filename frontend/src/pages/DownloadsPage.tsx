@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback, memo } from "react";
 import {
   Download,
   Loader2,
@@ -9,12 +9,20 @@ import {
   ChevronDown,
   ChevronRight,
   HelpCircle,
+  RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { api, DownloadJob, DownloadStatus } from "../lib/api";
 import { useHelp } from "../contexts/HelpContext";
+import { useToast } from "../contexts/ToastContext";
+
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 export default function DownloadsPage() {
   const { showHelp } = useHelp();
+  const toast = useToast();
   const [status, setStatus] = useState<DownloadStatus | null>(null);
   const [mode, setMode] = useState<"url" | "search">("url");
   const [url, setUrl] = useState("");
@@ -24,6 +32,7 @@ export default function DownloadsPage() {
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [logs, setLogs] = useState<Record<string, string[]>>({});
+  const [loading, setLoading] = useState(true);
   const pollRef = useRef<number | null>(null);
   const expandedRef = useRef<Record<string, boolean>>(expanded);
   const mountedRef = useRef(true);
@@ -54,6 +63,7 @@ export default function DownloadsPage() {
       if (!mountedRef.current) return;
       setStatus(s);
       setJobs(j);
+      setLoading(false);
       const currentExpanded = expandedRef.current;
       for (const id of Object.keys(currentExpanded)) {
         if (currentExpanded[id]) {
@@ -63,44 +73,106 @@ export default function DownloadsPage() {
               if (!mountedRef.current) return;
               setLogs((prev) => ({ ...prev, [id]: full.log || [] }));
             })
-            .catch(() => {});
+            .catch((err) => {
+              console.error(`[DownloadsPage] Failed to fetch job ${id}:`, err);
+            });
         }
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("[DownloadsPage] refresh failed:", err);
     }
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    const trimmedUrl = mode === "url" ? url.trim() : "";
+    const trimmedQuery = mode === "search" ? query.trim() : "";
+    if (mode === "url" && !trimmedUrl) {
+      setSubmitting(false);
+      return;
+    }
+    if (mode === "search" && !trimmedQuery) {
+      setSubmitting(false);
+      return;
+    }
     setSubmitting(true);
     try {
       if (mode === "url") {
-        if (!url.trim()) return;
-        await api.download(url.trim());
+        await api.download(trimmedUrl);
         setUrl("");
+        toast.success("Download started");
       } else {
-        if (!query.trim()) return;
-        await api.downloadSearch(query.trim());
+        await api.downloadSearch(trimmedQuery);
         setQuery("");
+        toast.success("Download started");
       }
       refresh();
     } catch (err: any) {
-      setError(err?.message || "Download failed");
+      console.error("[DownloadsPage] submit failed:", err);
+      const msg = err?.message || "Download failed";
+      setError(msg);
+      toast.error(msg);
     } finally {
       setSubmitting(false);
     }
   }
 
   async function cancel(id: string) {
-    await api.downloadCancel(id);
-    refresh();
+    if (!window.confirm("Cancel this download?")) return;
+    try {
+      await api.downloadCancel(id);
+      toast.info("Download cancelled");
+      refresh();
+    } catch (err: any) {
+      console.error(`[DownloadsPage] cancel failed for ${id}:`, err);
+      toast.error("Failed to cancel download");
+    }
   }
 
-  function toggle(id: string) {
-    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  async function retry(job: DownloadJob) {
+    try {
+      if (job.mode === "search" || job.is_search) {
+        await api.downloadSearch(job.url);
+      } else {
+        await api.download(job.url);
+      }
+      toast.success("Retrying download");
+      refresh();
+    } catch (err: any) {
+      console.error(`[DownloadsPage] retry failed for ${job.id}:`, err);
+      toast.error("Failed to retry download");
+    }
   }
+
+  const removeJob = useCallback((id: string) => {
+    setJobs((prev) => prev.filter((j) => j.id !== id));
+    setLogs((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setExpanded((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const clearCompleted = useCallback(() => {
+    setJobs((prev) => prev.filter((j) => j.status !== "succeeded"));
+  }, []);
+
+  const clearFailed = useCallback(() => {
+    setJobs((prev) => prev.filter((j) => j.status !== "failed" && j.status !== "cancelled"));
+  }, []);
+
+  const toggle = useCallback((id: string) => {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
+
+  const completedCount = jobs.filter((j) => j.status === "succeeded").length;
+  const failedCount = jobs.filter((j) => j.status === "failed" || j.status === "cancelled").length;
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -181,18 +253,20 @@ export default function DownloadsPage() {
                   type="url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://open.spotify.com/track/... or playlist/album"
+                  placeholder="https://open.spotify.com/track/..."
                   className="flex-1 bg-panel2 border border-panel2 rounded px-3 py-2 text-sm focus:outline-none focus:border-accent"
                   disabled={submitting}
+                  aria-label="Spotify URL"
                 />
               ) : (
                 <input
                   type="text"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder='Paradise By the Dashboard Light - Meat Loaf'
+                  placeholder="Song or podcast name"
                   className="flex-1 bg-panel2 border border-panel2 rounded px-3 py-2 text-sm focus:outline-none focus:border-accent"
                   disabled={submitting}
+                  aria-label="Search query"
                 />
               )}
               <button
@@ -229,19 +303,44 @@ export default function DownloadsPage() {
         )}
       </section>
 
-      <section>
-        <div className="flex items-center gap-2 mb-3">
-          <h2 className="text-lg font-semibold">Recent jobs</h2>
-          <button
-            onClick={() => showHelp("downloads.jobs")}
-            className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
-            aria-label="Help: Download Jobs"
-          >
-            <HelpCircle size={14} />
-          </button>
+      <section aria-live="polite" aria-label="Download jobs">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">Recent jobs</h2>
+            <button
+              onClick={() => showHelp("downloads.jobs")}
+              className="p-1 text-muted/50 hover:text-accent transition-colors rounded hover:bg-panel2/50"
+              aria-label="Help: Download Jobs"
+            >
+              <HelpCircle size={16} />
+            </button>
+          </div>
+          <div className="flex gap-2">
+            {completedCount > 0 && (
+              <button
+                onClick={clearCompleted}
+                className="text-xs text-muted hover:text-text px-2 py-1 rounded bg-panel2/50 hover:bg-panel2 transition-colors"
+              >
+                Clear completed ({completedCount})
+              </button>
+            )}
+            {failedCount > 0 && (
+              <button
+                onClick={clearFailed}
+                className="text-xs text-muted hover:text-text px-2 py-1 rounded bg-panel2/50 hover:bg-panel2 transition-colors"
+              >
+                Clear failed ({failedCount})
+              </button>
+            )}
+          </div>
         </div>
-        {jobs.length === 0 ? (
-          <p className="text-sm text-muted">No jobs yet.</p>
+        {loading ? (
+          <p className="text-sm text-muted">Loading jobs…</p>
+        ) : jobs.length === 0 ? (
+          <div className="text-sm text-muted bg-panel rounded-lg p-6 border border-panel2 text-center">
+            <p className="mb-1">No jobs yet.</p>
+            <p className="text-xs text-muted/60">Paste a Spotify URL above to start downloading, or try searching for a song by name.</p>
+          </div>
         ) : (
           <div className="space-y-2">
             {jobs.map((job) => (
@@ -252,6 +351,8 @@ export default function DownloadsPage() {
                 onToggle={() => toggle(job.id)}
                 log={logs[job.id]}
                 onCancel={() => cancel(job.id)}
+                onRetry={() => retry(job)}
+                onRemove={() => removeJob(job.id)}
               />
             ))}
           </div>
@@ -261,18 +362,22 @@ export default function DownloadsPage() {
   );
 }
 
-function JobRow({
+const JobRow = memo(function JobRow({
   job,
   expanded,
   onToggle,
   log,
   onCancel,
+  onRetry,
+  onRemove,
 }: {
   job: DownloadJob;
   expanded: boolean;
   onToggle: () => void;
   log?: string[];
   onCancel: () => void;
+  onRetry: () => void;
+  onRemove: () => void;
 }) {
   const Icon =
     job.status === "succeeded"
@@ -292,14 +397,19 @@ function JobRow({
       : "text-accent";
   const spinning = job.status === "running" || job.status === "queued";
 
+  const hasProgress = (job.progress ?? 0) > 0;
+
   return (
-    <div className="bg-panel rounded border border-panel2 overflow-hidden">
+    <div
+      className="bg-panel rounded border border-panel2 overflow-hidden"
+      aria-label={`Download job: ${job.url} — ${capitalize(job.status)}`}
+    >
       <div className="flex items-center gap-3 px-4 py-3">
         <Icon size={18} className={`${color} ${spinning ? "animate-spin" : ""}`} />
         <div className="flex-1 min-w-0">
           <div className="text-sm truncate font-mono">{job.url}</div>
           <div className="text-xs text-muted flex items-center gap-2 flex-wrap">
-            <span>{job.status}</span>
+            <span>{capitalize(job.status)}</span>
             <span>·</span>
             <span>{new Date(job.started_at * 1000).toLocaleTimeString()}</span>
             {job.kind && job.kind !== "music" && (
@@ -328,22 +438,59 @@ function JobRow({
               <span className="text-red-400 truncate"> · {job.error}</span>
             )}
           </div>
+          {/* Progress bar */}
+          {hasProgress && (job.status === "running" || job.status === "queued") && (
+            <div className="mt-1.5 flex items-center gap-2">
+              <div className="flex-1 h-1 bg-black/30 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-accent transition-all duration-500"
+                  style={{ width: `${Math.max(job.progress ?? 0, 2)}%` }}
+                />
+              </div>
+              <span className="text-[10px] text-muted tabular-nums w-10 text-right">
+                {job.progress_label || `${Math.round(job.progress ?? 0)}%`}
+              </span>
+            </div>
+          )}
         </div>
-        {(job.status === "running" || job.status === "queued") && (
+        <div className="flex items-center gap-1">
+          {(job.status === "running" || job.status === "queued") && (
+            <button
+              onClick={onCancel}
+              className="text-xs text-muted hover:text-red-400 px-2 py-1.5 rounded bg-panel2/50 hover:bg-red-400/10 transition-colors"
+              aria-label={`Cancel download: ${job.url}`}
+            >
+              Cancel
+            </button>
+          )}
+          {job.status === "failed" && (
+            <button
+              onClick={onRetry}
+              className="text-xs text-muted hover:text-accent px-2 py-1.5 rounded bg-panel2/50 hover:bg-accent/10 transition-colors flex items-center gap-1"
+              aria-label={`Retry download: ${job.url}`}
+            >
+              <RotateCcw size={12} />
+              Retry
+            </button>
+          )}
+          {(job.status === "succeeded" || job.status === "cancelled") && (
+            <button
+              onClick={onRemove}
+              className="text-xs text-muted hover:text-red-400 px-2 py-1.5 rounded bg-panel2/50 hover:bg-red-400/10 transition-colors"
+              aria-label={`Remove job: ${job.url}`}
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
           <button
-            onClick={onCancel}
-            className="text-xs text-muted hover:text-red-400 px-2 py-1"
+            onClick={onToggle}
+            className="text-muted hover:text-text p-1.5"
+            aria-label={expanded ? "Hide log" : "Show log"}
+            aria-expanded={expanded}
           >
-            Cancel
+            {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           </button>
-        )}
-        <button
-          onClick={onToggle}
-          className="text-muted hover:text-text"
-          aria-label="Toggle log"
-        >
-          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
+        </div>
       </div>
       {expanded && (
         <pre className="bg-black/40 text-xs text-muted px-4 py-3 max-h-64 overflow-auto whitespace-pre-wrap break-all">
@@ -352,4 +499,4 @@ function JobRow({
       )}
     </div>
   );
-}
+});

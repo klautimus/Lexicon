@@ -1,12 +1,30 @@
 # podcaster — Development Context
 
 > **Parent:** [backend](../development_context.md)
-> **File:** `backend/internal/podcaster/podcaster.go` (~1260 LOC) — 🆕 NEW in v2.8.0, updated v3.5.3
-> **Last updated:** 2026-05-21
+> **File:** `backend/internal/podcaster/podcaster.go` (~1418 LOC) — 🆕 NEW in v2.8.0, updated v3.5.3
+> **Last updated:** 2026-05-22
 
 ## Purpose
 
 Manages podcast feed subscriptions and episode downloads. Uses gofeed for RSS parsing and (when no direct audio URL is available) poddl as fallback. Downloaded episodes are indexed into the tracks table as media_kind='podcast'.
+
+## Cross-User Dedup (v3.5.4)
+
+### Problem
+In a multi-user setup, two users subscribed to the same podcast feed would each download their own copy of every episode — wasting disk space and bandwidth.
+
+### Solution
+
+**`checkEpisodeDedup(ctx, episodeID)`** — New method that queries ALL `podcast_episodes` (not scoped to current user) for the same GUID with `downloaded=1` and a valid `file_path`. Returns the existing file path and size if found, or empty/nil if no duplicate exists. Also verifies the file still exists on disk (gracefully degrades to re-download if deleted).
+
+**Single episode (`doDownloadEpisode`):**
+- Signature changed to accept `userID int64`
+- Before downloading, calls `checkEpisodeDedup` — if a duplicate is found, updates the requesting user's episode record to point to the existing file, marks job as succeeded, and triggers rescan. No new download occurs.
+
+**Bulk feed (`doDownloadFeed`):**
+- Signature changed to accept `userID int64`
+- **Dedup pre-pass:** before running poddl, iterates all undownloaded episodes and checks for cross-user dedup matches. Any matching episodes are marked as downloaded with the existing file path. Only truly-undownloaded episodes go to poddl for download.
+- Deduped episode count is logged to the job log.
 
 ## Unified Job Tracking (v2.10.0)
 
@@ -42,6 +60,7 @@ Env vars: `PODDL_BIN`, `PODCAST_DIR`
 ## Download Logic
 
 ### Single Episode (`doDownloadEpisode`)
+- **Cross-user dedup check** — before downloading, checks if any other user already downloaded this episode (matched by GUID). If found, reuses the existing file.
 - **If episode has a direct `audio_url` (from RSS enclosure):** Downloads directly via Go's `net/http` client — NOT via poddl. poddl only accepts RSS feed URLs, not direct audio URLs.
 - **If no direct URL:** Falls back to poddl with feed URL + `-r -t 1` flags (download latest episode only)
 - **Timeout:** 5-minute timeout on both direct downloads and poddl calls via `context.WithTimeout`
@@ -50,6 +69,7 @@ Env vars: `PODDL_BIN`, `PODCAST_DIR`
 - Triggers rescan after successful download
 
 ### Full Feed (`doDownloadFeed`)
+- **Dedup pre-pass:** before running poddl, checks all undownloaded episodes for cross-user dedup matches
 - Passes feed URL to poddl with `-r -h` flags: `poddl <feedURL> -o <outputDir> -r -h`
   - `-r`: newest episodes first (matches pub_date DESC order)
   - `-h`: quit when first existing file is found (efficient incremental downloads)

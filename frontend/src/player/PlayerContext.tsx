@@ -48,6 +48,7 @@ interface PlayerCtx extends PlayerState {
   toggleShuffle: () => void;
   toggleRepeat: () => void;
   setPodcastEpisodeId: (episodeId: number | null) => void;
+  addToQueue: (track: Track) => void;
 }
 
 const Ctx = createContext<PlayerCtx | null>(null);
@@ -147,7 +148,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     currentRef.current = t;
     setState((s) => ({ ...s, error: null, loading: true }));
 
-    const isSpotify = !!t.spotify_id;
+    // Prefer local file if the track has a downloaded path, even if it also has a spotify_id.
+    // Only fall back to Spotify when there is no local copy.
+    const isSpotify = !!t.spotify_id && !t.path;
 
     if (isSpotify) {
       const a = audioRef.current;
@@ -661,6 +664,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
   }, [clearPodcastSaveInterval]);
 
+  const addToQueue = useCallback((track: Track) => {
+    setState((s) => ({
+      ...s,
+      queue: [...s.queue, track],
+    }));
+  }, []);
+
   return (
     <Ctx.Provider
       value={{
@@ -674,6 +684,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         toggleShuffle,
         toggleRepeat,
         setPodcastEpisodeId: setPodcastEpisodeIdCb,
+        addToQueue,
       }}
     >
       {children}

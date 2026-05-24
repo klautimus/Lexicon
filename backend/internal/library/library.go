@@ -55,6 +55,7 @@ func (a *API) Mount(r chi.Router) {
 	r.Get("/api/library/track/{id}", a.track)
 	r.Delete("/api/library/track/{id}", a.deleteTrack)
 	r.Get("/api/library/cover/{id}", a.cover)
+	r.Get("/api/library/cover-by-path", a.coverByPath)
 	r.Get("/api/library/stats", a.stats)
 }
 
@@ -360,6 +361,41 @@ func (a *API) cover(w http.ResponseWriter, r *http.Request) {
 	f, err := openReader(path)
 	if err != nil {
 		log.Printf("[library] cover open id %d path %s: %v", id, path, err)
+		writeError(w, "", 404)
+		return
+	}
+	defer f.Close()
+	pic := readCover(f)
+	if pic == nil {
+		writeError(w, "no cover", 404)
+		return
+	}
+	w.Header().Set("Content-Type", pic.MIMEType)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(pic.Data)
+}
+
+// coverByPath serves cover art for a file at the given path, with path
+// traversal protection via ValidatePath against configured media roots.
+func (a *API) coverByPath(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, "missing path parameter", 400)
+		return
+	}
+	// Validate path against media roots with symlink resolution
+	if len(a.mediaRoots) > 0 {
+		resolved, err := streamerpkg.ValidatePath(path, a.mediaRoots)
+		if err != nil {
+			log.Printf("[library] coverByPath path rejected %s: %v", path, err)
+			writeError(w, "forbidden", 403)
+			return
+		}
+		path = resolved
+	}
+	f, err := openReader(path)
+	if err != nil {
+		log.Printf("[library] coverByPath open %s: %v", path, err)
 		writeError(w, "", 404)
 		return
 	}

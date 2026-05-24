@@ -378,13 +378,49 @@ Lexicon uses your listening history to generate personalized recommendations. Th
 • **Better recommendations** — AI uses your full listening profile
 • **Library enrichment** — Combines local + streaming data
 
+**Prerequisites:**
+You need an **Apple Developer Program membership** ($99/year). Apple Music API access is gated behind it.
+
 **Setup:**
-1. You need an Apple Developer account
-2. Generate a MusicKit private key (.p8 file)
-3. Enter your Team ID, Key ID, and .p8 contents in the settings form
-4. Connect via MusicKit in your browser
+1. Sign in to developer.apple.com/account and find your **Team ID** on the Membership page (10 characters, mix of letters and numbers).
+2. Create a **Media identifier**: Go to Identifiers → Media IDs → New → Media IDs. Call it \`media.lexicon\` (or similar).
+3. Create a **MusicKit private key**: Go to Keys → New → check **MusicKit** → associate it with the Media ID from step 2. Download the \`.p8\` file (you can only download it once). The 10-character **Key ID** is shown on this page.
+4. Paste your Team ID, Key ID, and the full contents of the .p8 file (including the PRIVATE KEY headers) into the settings form.
+5. Click "Save credentials" then "Connect Apple Music" to authorize via Apple's MusicKit popup.
+
+**Common pitfalls:**
+• Ensure the .p8 file hasn't expired (keys don't expire, but the file download is one-time only)
+• The Key ID must match the downloaded key
+• The Team ID is from your Apple Developer account (not your Apple ID)
+• Popups must be allowed for the authorization step
+• Developer tokens are minted server-side and are valid for up to 6 months
+
+**Token expiry:**
+Your developer token expires after ~6 months. When it's expiring soon, you'll see a yellow warning. When expired, you'll need to generate a new private key and update your credentials.
 
 **Note:** Apple Music playback within Lexicon is not yet supported (data sync only).`,
+  },
+
+  // ── User Management ──────────────────────────────────────────
+  "users.management": {
+    title: "Family Accounts",
+    content: `**Family Accounts** lets you manage who has access to Lexicon on this computer.
+
+**Creating accounts:**
+• Click **"Add Account"** to create a new family member account
+• Each account needs a username and password
+• Display name is optional (defaults to username)
+• Passwords must be at least 4 characters
+
+**Managing accounts:**
+• **Admin accounts** (marked with a shield badge) can create and delete other accounts
+• You cannot delete your own account
+• Deleting an account removes it permanently — this cannot be undone
+
+**Tips:**
+• Create separate accounts for each family member so listening history stays personal
+• Only admin accounts can see this page
+• If someone forgets their password, an admin can delete and recreate their account`,
   },
 
   // ── Player ──────────────────────────────────────────────────

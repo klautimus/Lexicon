@@ -45,6 +45,7 @@ export default function PlaylistsPage() {
 
   async function handleDeletePlaylist(id: number, name: string) {
     if (deletingIds.has(id)) return;
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return;
     setDeletingIds((prev) => new Set(prev).add(id));
     try {
       await api.deletePlaylist(id);
@@ -77,8 +78,10 @@ export default function PlaylistsPage() {
       // C4: Handle 409 duplicate name
       if (msg.includes("409") || msg.includes("already exists")) {
         setError("A playlist with this name already exists.");
+        setNewName("");
       } else {
         setError(msg);
+        setNewName("");
       }
     } finally {
       setCreating(false);
@@ -201,13 +204,25 @@ export default function PlaylistsPage() {
                     className="bg-panel2 border border-panel2 rounded-lg p-4 hover:border-accent/50 transition block"
                   >
                     <div className="flex items-start justify-between mb-3">
-                      <div className="w-10 h-10 rounded bg-panel flex items-center justify-center">
-                        <Music size={20} className="text-accent" />
-                      </div>
+                      {p.cover_art_path ? (
+                        <img
+                          src={`/api/library/cover-by-path?path=${encodeURIComponent(p.cover_art_path)}`}
+                          alt=""
+                          className="w-10 h-10 rounded object-cover"
+                          onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded bg-panel flex items-center justify-center">
+                          <Music size={20} className="text-accent" />
+                        </div>
+                      )}
                     </div>
                     <h3 className="font-medium truncate group-hover:text-accent transition">
                       {p.name}
                     </h3>
+                    {p.description && (
+                      <p className="text-xs text-muted mt-1 line-clamp-2">{p.description}</p>
+                    )}
                     <div className="flex items-center gap-3 mt-2 text-xs text-muted">
                       <span className="flex items-center gap-1">
                         <ListMusic size={12} />

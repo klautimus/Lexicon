@@ -206,14 +206,21 @@ export default function RecsPage() {
           </button>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => downloads.generateAiPlaylist(false, trackCount)}
-            disabled={downloads.generatingPlaylist}
-            className="px-3 py-2 bg-panel2 border border-panel2 hover:border-accent text-text rounded-md font-medium flex items-center gap-2 disabled:opacity-60 transition"
-          >
-            <ListMusic size={14} className={downloads.generatingPlaylist ? "animate-spin" : ""} />
-            {downloads.generatingPlaylist ? "Thinking…" : "Generate Playlist"}
-          </button>
+          {downloads.generatingPlaylist ? (
+            <button
+              onClick={() => downloads.cancelGeneration()}
+              className="px-3 py-2 bg-red-500/20 border border-red-500/40 hover:border-red-500 text-red-400 rounded-md font-medium flex items-center gap-2 transition"
+            >
+              <X size={14} /> Cancel
+            </button>
+          ) : (
+            <button
+              onClick={() => downloads.generateAiPlaylist(false, trackCount)}
+              className="px-3 py-2 bg-panel2 border border-panel2 hover:border-accent text-text rounded-md font-medium flex items-center gap-2 transition"
+            >
+              <ListMusic size={14} /> Generate Playlist
+            </button>
+          )}
           <button
             onClick={refresh}
             disabled={loading}

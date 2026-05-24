@@ -196,13 +196,22 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
     [downloadingIds, toast, trackDownload]
   );
 
+  const cancelGeneration = useCallback(() => {
+    if (genAbortRef.current) {
+      genAbortRef.current.abort();
+      genAbortRef.current = null;
+    }
+    setGeneratingPlaylist(false);
+  }, []);
+
   const generateAiPlaylist = useCallback(async (force?: boolean, count?: number) => {
     setGeneratingPlaylist(true);
     setPlaylistPreview(null);
     setCreatedPlaylistId(null);
     setPlaylistTrackStatus({});
+    genAbortRef.current = new AbortController();
     try {
-      const data = await api.generatePlaylist(force, count);
+      const data = await api.generatePlaylist(force, count, genAbortRef.current.signal);
       setPlaylistPreview(data);
       const initStatus: Record<string, "pending"> = {};
       data.tracks.forEach((t) => {
@@ -210,9 +219,12 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
       });
       setPlaylistTrackStatus(initStatus);
     } catch (e: any) {
-      toast.error("Failed to generate playlist: " + e.message);
+      if (e?.name !== "AbortError") {
+        toast.error("Failed to generate playlist: " + e.message);
+      }
     } finally {
       setGeneratingPlaylist(false);
+      genAbortRef.current = null;
     }
   }, [toast]);
 
@@ -254,12 +266,18 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
 
                 // Sub-case B1: Backend populated track_id (resolved or after rescan)
                 if (updated.track_id) {
-                  await api.addToPlaylist(playlist.id, updated.track_id);
-                  setPlaylistTrackStatus((prev) => ({
-                    ...prev,
-                    [key]: "completed",
-                  }));
-                  toast.success(`"${key}" added to playlist`);
+                  try {
+                    await api.addToPlaylist(playlist.id, updated.track_id);
+                    setPlaylistTrackStatus((prev) => ({
+                      ...prev,
+                      [key]: "completed",
+                    }));
+                    toast.success(`"${key}" added to playlist`);
+                  } catch (e) {
+                    console.error(`[DownloadContext] addToPlaylist failed for "${key}":`, e);
+                    // Don't clear the outer polling interval — the track_id might
+                    // appear on a subsequent poll after a rescan.
+                  }
                   return;
                 }
 
@@ -323,7 +341,8 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
                   [key]: "failed",
                 }));
               }
-            } catch {
+            } catch (e) {
+              console.error(`[DownloadContext] createAiPlaylist poll failed for "${key}":`, e);
               window.clearInterval(interval);
               delete pollRef.current[job.id];
               setPlaylistTrackStatus((prev) => ({
@@ -359,6 +378,7 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
         downloadItem,
         trackDownload,
         generateAiPlaylist,
+        cancelGeneration,
         createAiPlaylist,
         clearPlaylistPreview,
         adoptPlaylistPreview,

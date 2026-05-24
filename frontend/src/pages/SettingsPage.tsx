@@ -1,17 +1,26 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, AlertCircle, RefreshCw, Link2, Unlink, HelpCircle } from "lucide-react";
 import { api, SpotifyStatus } from "../lib/api";
 import AppleMusicSettings from "../components/AppleMusicSettings";
 import { useHelp } from "../contexts/HelpContext";
+import { useToast } from "../contexts/ToastContext";
+import ConfirmModal from "../components/ConfirmModal";
 
 export default function SettingsPage() {
   const { showHelp } = useHelp();
+  const { success: toastSuccess, error: toastError } = useToast();
   const [status, setStatus] = useState<SpotifyStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [params] = useSearchParams();
   const justConnected = params.get("spotify") === "ok";
   const errorReason = params.get("spotify") === "error" ? params.get("reason") : null;
+
+  // Phase 3: ConfirmModal state
+  const [disconnectConfirm, setDisconnectConfirm] = useState(false);
+
+  // Phase 3.3: Unmount guard for syncNow setTimeout
+  const cancelledRef = useRef(false);
 
   async function load() {
     try {
@@ -19,26 +28,55 @@ export default function SettingsPage() {
       setStatus(s);
     } catch (e) {
       console.error("[SettingsPage] failed to load Spotify status", e);
+      setStatus(null);
+      toastError("Failed to load Spotify status.");
     }
   }
+
   useEffect(() => {
     load();
+    return () => {
+      cancelledRef.current = true;
+    };
   }, []);
 
+  // Phase 3.1: try/finally + Phase 3: ConfirmModal
   async function disconnect() {
-    if (!confirm("Disconnect Spotify? Your synced history stays.")) return;
-    setBusy(true);
-    await api.spotifyDisconnect();
-    setBusy(false);
-    load();
+    setDisconnectConfirm(true);
   }
 
+  async function handleDisconnect() {
+    setDisconnectConfirm(false);
+    setBusy(true);
+    try {
+      await api.spotifyDisconnect();
+      toastSuccess("Spotify disconnected.");
+    } catch (e) {
+      console.error("[SettingsPage] disconnect failed", e);
+      toastError("Failed to disconnect Spotify.");
+    } finally {
+      setBusy(false);
+      load();
+    }
+  }
+
+  // Phase 3.4: try/finally + Phase 3.3: unmount guard
   async function syncNow() {
     setBusy(true);
-    await api.spotifySync();
-    setTimeout(() => {
-      load();
+    try {
+      await api.spotifySync();
+      toastSuccess("Spotify sync triggered.");
+    } catch (e) {
+      console.error("[SettingsPage] sync failed", e);
+      toastError("Failed to sync Spotify.");
       setBusy(false);
+      return;
+    }
+    setTimeout(() => {
+      if (!cancelledRef.current) {
+        load();
+        setBusy(false);
+      }
     }, 2000);
   }
 
@@ -61,7 +99,11 @@ export default function SettingsPage() {
             <h2 className="text-lg font-semibold flex items-center gap-2">
               Spotify
               {status?.connected && (
-                <span className="w-2 h-2 rounded-full bg-green-400" title="Connected" />
+                <span
+                  className="w-2 h-2 rounded-full bg-green-400"
+                  role="status"
+                  aria-label="Spotify connected"
+                />
               )}
             </h2>
             <p className="text-sm text-muted">
@@ -77,13 +119,16 @@ export default function SettingsPage() {
           </div>
         )}
         {errorReason && (
-          <div className="flex items-center gap-2 text-sm text-red-400 bg-red-400/10 border border-red-400/30 rounded px-3 py-2">
+          <div
+            className="flex items-center gap-2 text-sm text-red-400 bg-red-400/10 border border-red-400/30 rounded px-3 py-2"
+            role="alert"
+          >
             <AlertCircle size={16} /> Spotify returned an error: {errorReason}
           </div>
         )}
 
         {!status ? (
-          <p className="text-sm text-muted">Loading…</p>
+          <p className="text-sm text-muted" aria-live="polite">Loading…</p>
         ) : !status.configured ? (
           <div className="text-sm text-muted bg-panel2/50 rounded p-3 border border-panel2">
             <p className="mb-2">
@@ -148,7 +193,7 @@ export default function SettingsPage() {
                 {status.has_playback_sdk ? "Enabled" : "Premium required"}
               </Field>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <button
                 onClick={syncNow}
                 disabled={busy}
@@ -170,6 +215,16 @@ export default function SettingsPage() {
       </section>
 
       <AppleMusicSettings />
+
+      <ConfirmModal
+        open={disconnectConfirm}
+        title="Disconnect Spotify"
+        message="Disconnect Spotify? Your synced history stays."
+        confirmLabel="Disconnect"
+        variant="danger"
+        onConfirm={handleDisconnect}
+        onCancel={() => setDisconnectConfirm(false)}
+      />
     </div>
   );
 }

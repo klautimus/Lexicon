@@ -11,6 +11,9 @@ import {
   Clock,
   ListMusic,
   HelpCircle,
+  Plus,
+  Search,
+  XCircle,
 } from "lucide-react";
 import { api, PlaylistWithTracks, Track } from "../lib/api";
 import { usePlayer } from "../player/PlayerContext";
@@ -69,6 +72,7 @@ export default function PlaylistPage() {
   const [notFound, setNotFound] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showAddTracks, setShowAddTracks] = useState(false);
 
   // B7: Validate id param is a valid number
   const playlistId = id && /^\d+$/.test(id) ? Number(id) : null;
@@ -115,9 +119,26 @@ export default function PlaylistPage() {
     try {
       await api.removeFromPlaylist(playlistId, pos);
       toast.success("Track removed from playlist");
-      // Re-fetch to ensure consistency
-      const data = await api.playlist(playlistId);
-      setPlaylist(data);
+    } catch (e) {
+      // Rollback on error
+      if (prevPlaylist) setPlaylist(prevPlaylist);
+      toast.error(parseApiError(e));
+    }
+  }, [playlistId, playlist, toast]);
+
+  // F2: Drag-and-drop reorder
+  const handleReorder = useCallback(async (from: number, to: number) => {
+    if (!playlistId || from === to) return;
+    // Optimistic update
+    const prevPlaylist = playlist;
+    if (playlist) {
+      const newTracks = [...playlist.tracks];
+      const [moved] = newTracks.splice(from, 1);
+      newTracks.splice(to, 0, moved);
+      setPlaylist({ ...playlist, tracks: newTracks });
+    }
+    try {
+      await api.reorderPlaylist(playlistId, from, to);
     } catch (e) {
       // Rollback on error
       if (prevPlaylist) setPlaylist(prevPlaylist);
@@ -129,7 +150,7 @@ export default function PlaylistPage() {
     if (!playlistId || !editName.trim()) return;
     setSaving(true);
     try {
-      await api.updatePlaylist(playlistId, editName.trim());
+      await api.updatePlaylist(playlistId, editName.trim(), playlist?.description, playlist?.cover_art_path);
       setEditing(false);
       if (playlist) {
         setPlaylist({ ...playlist, name: editName.trim() });
@@ -144,6 +165,7 @@ export default function PlaylistPage() {
 
   async function deletePlaylist() {
     if (!playlistId) return;
+    if (!window.confirm(`Delete "${playlist?.name || 'this playlist'}"? This cannot be undone.`)) return;
     setDeleting(true);
     try {
       await api.deletePlaylist(playlistId);
@@ -231,9 +253,22 @@ export default function PlaylistPage() {
         <ArrowLeft size={14} /> Back to playlists
       </button>
 
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex-1">
-          {editing ? (
+      <div className="flex items-start justify-between gap-4 group">
+        <div className="flex items-start gap-4 flex-1">
+          {playlist.cover_art_path ? (
+            <img
+              src={`/api/library/cover-by-path?path=${encodeURIComponent(playlist.cover_art_path)}`}
+              alt=""
+              className="w-20 h-20 rounded-lg object-cover flex-shrink-0"
+              onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+            />
+          ) : (
+            <div className="w-20 h-20 rounded-lg bg-panel2 flex items-center justify-center flex-shrink-0">
+              <Music size={32} className="text-accent" />
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            {editing ? (
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -289,6 +324,10 @@ export default function PlaylistPage() {
               </span>
             )}
           </div>
+          {playlist.description && (
+            <p className="text-sm text-muted mt-2">{playlist.description}</p>
+          )}
+        </div>
         </div>
         <div className="flex items-center gap-2">
           {playlist.tracks.length > 0 && (
@@ -320,6 +359,28 @@ export default function PlaylistPage() {
         <HelpCircle size={12} /> How to manage this playlist
       </button>
 
+      {/* F3: Add tracks to playlist */}
+      <div>
+        <button
+          onClick={() => setShowAddTracks(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-panel2 hover:bg-panel2/80 text-sm rounded transition-colors"
+        >
+          <Plus size={16} />
+          Add tracks
+        </button>
+      </div>
+
+      {showAddTracks && (
+        <AddTracksModal
+          playlistId={playlistId}
+          existingTrackIds={new Set(playlist.tracks.map((t) => t.id))}
+          onClose={() => setShowAddTracks(false)}
+          onAdded={() => {
+            load();
+          }}
+        />
+      )}
+
       {playlist.tracks.length === 0 ? (
         <div className="text-center py-12 space-y-2">
           <Music size={40} className="mx-auto text-muted" />
@@ -332,8 +393,126 @@ export default function PlaylistPage() {
           </p>
         </div>
       ) : (
-        <PlaylistTrackList tracks={playlist.tracks} onRemove={(pos) => remove(pos)} player={player} />
+        <PlaylistTrackList tracks={playlist.tracks} onRemove={(pos) => remove(pos)} player={player} onReorder={handleReorder} />
       )}
+    </div>
+  );
+}
+
+// F3: Add tracks modal
+function AddTracksModal({
+  playlistId,
+  existingTrackIds,
+  onClose,
+  onAdded,
+}: {
+  playlistId: number | null;
+  existingTrackIds: Set<number>;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Track[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [addingId, setAddingId] = useState<number | null>(null);
+
+  async function search() {
+    if (!query.trim()) {
+      setResults([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const data = await api.search(query.trim());
+      setResults(data.filter((t) => !existingTrackIds.has(t.id)));
+    } catch {
+      toast.error("Search failed");
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function addTrack(track: Track) {
+    if (!playlistId) return;
+    setAddingId(track.id);
+    try {
+      await api.addToPlaylist(playlistId, track.id);
+      setResults(prev => prev.filter(t => t.id !== track.id));
+      toast.success(`Added "${track.title}" to playlist`);
+      onAdded();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to add track");
+    } finally {
+      setAddingId(null);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="bg-panel border border-panel2 rounded-lg w-full max-w-lg max-h-[80vh] flex flex-col shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-panel2">
+          <h2 className="text-lg font-medium">Add tracks to playlist</h2>
+          <button onClick={onClose} className="p-1 text-muted hover:text-text" aria-label="Close">
+            <XCircle size={20} />
+          </button>
+        </div>
+        <div className="px-4 py-3 flex gap-2">
+          <div className="relative flex-1">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && search()}
+              placeholder="Search tracks..."
+              className="w-full bg-panel2 border border-panel2 rounded pl-8 pr-3 py-2 text-sm focus:outline-none focus:border-accent"
+              autoFocus
+              aria-label="Search tracks to add"
+            />
+          </div>
+          <button
+            onClick={search}
+            disabled={searching || !query.trim()}
+            className="px-4 py-2 bg-accent hover:opacity-90 text-black font-medium rounded text-sm disabled:opacity-50"
+          >
+            {searching ? "Searching..." : "Search"}
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 pb-4">
+          {results.length === 0 && query.trim() && !searching && (
+            <p className="text-muted text-sm text-center py-8">No tracks found</p>
+          )}
+          {results.length === 0 && !query.trim() && (
+            <p className="text-muted text-sm text-center py-8">Search for tracks to add to this playlist</p>
+          )}
+          {searching && <p className="text-muted text-sm text-center py-8">Searching...</p>}
+          <div className="space-y-1">
+            {results.map((track) => (
+              <div
+                key={track.id}
+                className="flex items-center gap-3 px-2 py-2 rounded hover:bg-panel2/50 group"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm truncate">{track.title}</div>
+                  <div className="text-xs text-muted truncate">{track.artist}</div>
+                </div>
+                <button
+                  onClick={() => addTrack(track)}
+                  disabled={addingId === track.id}
+                  className="flex items-center gap-1 px-3 py-1 text-xs bg-accent/10 text-accent hover:bg-accent/20 rounded disabled:opacity-50"
+                >
+                  <Plus size={12} />
+                  {addingId === track.id ? "Adding..." : "Add"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -342,12 +521,17 @@ function PlaylistTrackList({
   tracks,
   onRemove,
   player,
+  onReorder,
 }: {
   tracks: Track[];
   onRemove: (index: number) => void;
   player: ReturnType<typeof usePlayer>;
+  onReorder?: (from: number, to: number) => void;
 }) {
   const isMobile = useIsMobile();
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+
   if (isMobile) {
     return (
       <div className="space-y-2">
@@ -359,6 +543,11 @@ function PlaylistTrackList({
             tracks={tracks}
             onRemove={() => onRemove(t.position ?? i)}
             player={player}
+            onReorder={onReorder}
+            dragIndex={dragIndex}
+            setDragIndex={setDragIndex}
+            dropIndex={dropIndex}
+            setDropIndex={setDropIndex}
           />
         ))}
       </div>
@@ -386,6 +575,11 @@ function PlaylistTrackList({
               tracks={tracks}
               onRemove={() => onRemove(t.position ?? i)}
               player={player}
+              onReorder={onReorder}
+              dragIndex={dragIndex}
+              setDragIndex={setDragIndex}
+              dropIndex={dropIndex}
+              setDropIndex={setDropIndex}
             />
           ))}
         </tbody>
@@ -400,22 +594,61 @@ function DesktopPlaylistTrackRow({
   tracks,
   onRemove,
   player,
+  onReorder,
+  dragIndex,
+  setDragIndex,
+  dropIndex,
+  setDropIndex,
 }: {
   track: Track;
   index: number;
   tracks: Track[];
   onRemove: () => void;
   player: ReturnType<typeof usePlayer>;
+  onReorder?: (from: number, to: number) => void;
+  dragIndex: number | null;
+  setDragIndex: (i: number | null) => void;
+  dropIndex: number | null;
+  setDropIndex: (i: number | null) => void;
 }) {
   const isCurrentTrack = player.current?.id === track.id;
+  const isDragging = dragIndex === index;
+  const isDropTarget = dropIndex === index;
   return (
     <tr
+      draggable={!!onReorder}
+      onDragStart={(e) => {
+        if (!onReorder) return;
+        setDragIndex(index);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragOver={(e) => {
+        if (!onReorder || dragIndex === null) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setDropIndex(index);
+      }}
+      onDragLeave={() => {
+        if (dropIndex === index) setDropIndex(null);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (onReorder && dragIndex !== null && dragIndex !== index) {
+          onReorder(dragIndex, index);
+        }
+        setDragIndex(null);
+        setDropIndex(null);
+      }}
+      onDragEnd={() => {
+        setDragIndex(null);
+        setDropIndex(null);
+      }}
       onDoubleClick={() => player.play(tracks, index)}
       tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === "Enter") player.play(tracks, index);
       }}
-      className={`border-t border-panel2 hover:bg-panel2/40 cursor-pointer group ${isCurrentTrack ? "bg-accent/10" : ""}`}
+      className={`border-t border-panel2 hover:bg-panel2/40 cursor-pointer group ${isCurrentTrack ? "bg-accent/10" : ""} ${isDragging ? "opacity-50" : ""} ${isDropTarget ? "border-t-2 border-t-accent" : ""}`}
     >
       <td className="px-4 py-2 text-muted">
         <button
@@ -455,17 +688,56 @@ function MobilePlaylistTrackCard({
   tracks,
   onRemove,
   player,
+  onReorder,
+  dragIndex,
+  setDragIndex,
+  dropIndex,
+  setDropIndex,
 }: {
   track: Track;
   index: number;
   tracks: Track[];
   onRemove: () => void;
   player: ReturnType<typeof usePlayer>;
+  onReorder?: (from: number, to: number) => void;
+  dragIndex: number | null;
+  setDragIndex: (i: number | null) => void;
+  dropIndex: number | null;
+  setDropIndex: (i: number | null) => void;
 }) {
   const isCurrentTrack = player.current?.id === track.id;
+  const isDragging = dragIndex === index;
+  const isDropTarget = dropIndex === index;
   return (
     <div
-      className={`bg-panel border border-panel2 rounded-lg p-3 flex items-center gap-3 active:bg-panel2/50 transition-colors ${isCurrentTrack ? "border-accent/50 bg-accent/5" : ""}`}
+      draggable={!!onReorder}
+      onDragStart={(e) => {
+        if (!onReorder) return;
+        setDragIndex(index);
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragOver={(e) => {
+        if (!onReorder || dragIndex === null) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        setDropIndex(index);
+      }}
+      onDragLeave={() => {
+        if (dropIndex === index) setDropIndex(null);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (onReorder && dragIndex !== null && dragIndex !== index) {
+          onReorder(dragIndex, index);
+        }
+        setDragIndex(null);
+        setDropIndex(null);
+      }}
+      onDragEnd={() => {
+        setDragIndex(null);
+        setDropIndex(null);
+      }}
+      className={`bg-panel border border-panel2 rounded-lg p-3 flex items-center gap-3 active:bg-panel2/50 transition-colors ${isCurrentTrack ? "border-accent/50 bg-accent/5" : ""} ${isDragging ? "opacity-50" : ""} ${isDropTarget ? "border-accent border-2" : ""}`}
       onClick={() => player.play(tracks, index)}
     >
       <span className={`text-xs w-5 flex-shrink-0 ${isCurrentTrack ? "text-accent" : "text-muted"}`}>{index + 1}</span>

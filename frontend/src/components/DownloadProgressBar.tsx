@@ -7,17 +7,20 @@ export default function DownloadProgressBar() {
   const pollRef = useRef<number | null>(null);
   const [showComplete, setShowComplete] = useState(false);
 
+  const prevJobsRef = useRef<DownloadJob[]>([]);
+
   useEffect(() => {
     const poll = async () => {
       try {
         const jobs = await api.downloadProgress();
-        setItems(jobs);
 
-        // Flash "complete" briefly when downloads finish
-        if (jobs.length === 0 && pollRef.current !== null) {
+        // Flash "complete" only when transitioning from active to idle
+        if (jobs.length === 0 && prevJobsRef.current.length > 0) {
           setShowComplete(true);
           setTimeout(() => setShowComplete(false), 3000);
         }
+        prevJobsRef.current = jobs;
+        setItems(jobs);
       } catch {
         // Silently fail — progress bar is non-critical
       }

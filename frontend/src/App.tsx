@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Routes, Route, NavLink, Navigate } from "react-router-dom";
 import {
   Library,
@@ -28,7 +29,6 @@ import DownloadProgressBar from "./components/DownloadProgressBar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useIsMobile } from "./hooks/useIsMobile";
 import HomePage from "./pages/HomePage";
-import MusicPage from "./pages/MusicPage";
 import PodcastsPage from "./pages/PodcastsPage";
 import AnalyticsPage from "./pages/AnalyticsPage";
 import RecsPage from "./pages/RecsPage";
@@ -39,7 +39,11 @@ import PlaylistsPage from "./pages/PlaylistsPage";
 import PlaylistPage from "./pages/PlaylistPage";
 import LoginPage from "./pages/LoginPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
+import NotFoundPage from "./pages/NotFoundPage";
 import { api } from "./lib/api";
+
+// 6.8: Code split MusicPage with React.lazy
+const MusicPage = lazy(() => import("./pages/MusicPage"));
 
 const navItems = [
   { to: "/", label: "Home", icon: Library, end: true, helpKey: "home.stats" },
@@ -204,7 +208,7 @@ function DesktopLayout() {
         <div className="flex-1 overflow-auto p-6">
           <Routes>
             <Route path="/" element={<HomePage />} />
-            <Route path="/music" element={<MusicPage />} />
+            <Route path="/music" element={<Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin text-muted" /></div>}><MusicPage /></Suspense>} />
             <Route path="/podcasts" element={<PodcastsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/discover" element={<RecsPage />} />
@@ -214,6 +218,7 @@ function DesktopLayout() {
             <Route path="/search" element={<SearchPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/settings/users" element={<AdminGuard><AdminUsersPage /></AdminGuard>} />
+            <Route path="*" element={<NotFoundPage />} />
           </Routes>
         </div>
         <PlayerBar />
@@ -251,7 +256,7 @@ function MobileLayout() {
       <main className="flex-1 overflow-auto p-4 pb-28">
         <Routes>
           <Route path="/" element={<HomePage />} />
-          <Route path="/music" element={<MusicPage />} />
+          <Route path="/music" element={<Suspense fallback={<div className="flex items-center justify-center h-full"><Loader2 size={24} className="animate-spin text-muted" /></div>}><MusicPage /></Suspense>} />
           <Route path="/podcasts" element={<PodcastsPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
           <Route path="/discover" element={<RecsPage />} />
@@ -261,6 +266,7 @@ function MobileLayout() {
           <Route path="/search" element={<SearchPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/settings/users" element={<AdminGuard><AdminUsersPage /></AdminGuard>} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
       <MobilePlayerBar />

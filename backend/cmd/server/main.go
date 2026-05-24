@@ -75,7 +75,7 @@ func main() {
 		log.Fatalf("db migrate: %v", err)
 	}
 
-	scn := scanner.New(database)
+	scn := scanner.New(database, cfg.FfmpegBin)
 
 	// Compute podcast output directory early so it can be included in
 	// the media roots for the streamer and cover handler's path checks.

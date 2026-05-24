@@ -12,7 +12,9 @@ import {
   Download,
   BarChart3,
   Settings,
+  Shield,
 } from "lucide-react";
+import { useUser } from "../contexts/UserContext";
 
 const primaryTabs = [
   { to: "/", label: "Home", icon: Library },
@@ -29,11 +31,21 @@ const overflowItems = [
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
+// Admin-only overflow items
+const adminOverflowItems = [
+  { to: "/settings/users", label: "Users", icon: Shield },
+];
+
 export default function MobileNavBar() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const location = useLocation();
+  const { isAdmin } = useUser();
 
-  const isOverflowActive = overflowItems.some((i) =>
+  const allOverflowItems = isAdmin
+    ? [...overflowItems.slice(0, -1), ...adminOverflowItems, overflowItems[overflowItems.length - 1]]
+    : overflowItems;
+
+  const isOverflowActive = allOverflowItems.some((i) =>
     location.pathname.startsWith(i.to)
   );
 
@@ -113,7 +125,7 @@ export default function MobileNavBar() {
               </button>
             </div>
             <div className="grid grid-cols-3 gap-2">
-              {overflowItems.map((item) => {
+              {allOverflowItems.map((item) => {
                 const active = location.pathname.startsWith(item.to);
                 return (
                   <NavLink

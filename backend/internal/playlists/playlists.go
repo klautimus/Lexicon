@@ -18,6 +18,8 @@ type Playlist struct {
 	TrackCount    int    `json:"track_count"`
 	TotalDuration int    `json:"total_duration"`
 	CreatedAt     int64  `json:"created_at"`
+	Description   string `json:"description"`
+	CoverArtPath  string `json:"cover_art_path"`
 }
 
 type PlaylistTrack struct {
@@ -31,6 +33,8 @@ type PlaylistWithTracks struct {
 	TrackCount    int             `json:"track_count"`
 	TotalDuration int             `json:"total_duration"`
 	CreatedAt     int64           `json:"created_at"`
+	Description   string          `json:"description"`
+	CoverArtPath  string          `json:"cover_art_path"`
 	Tracks        []PlaylistTrack `json:"tracks"`
 }
 
@@ -72,6 +76,7 @@ func (a *API) Mount(r chi.Router) {
 	r.Delete("/api/playlists/{id}", a.delete)
 	r.Post("/api/playlists/{id}/tracks", a.addTrack)
 	r.Delete("/api/playlists/{id}/tracks/{position}", a.removeTrack)
+	r.Put("/api/playlists/{id}/tracks/reorder", a.reorderTracks)
 }
 
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
@@ -79,20 +84,20 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	var query string
 	var args []interface{}
 	if uid > 0 {
-		// Authenticated: only show this user's playlists (no legacy NULL playlists)
+		// Authenticated: show this user's playlists AND legacy playlists (user_id IS NULL or 0)
 		query = `
-			SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at
+			SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at, COALESCE(p.description,''), COALESCE(p.cover_art_path,'')
 			FROM playlists p
 			LEFT JOIN playlist_items i ON i.playlist_id = p.id
 			LEFT JOIN tracks t ON t.id = i.track_id
-			WHERE p.user_id = ?
+			WHERE p.user_id IS NULL OR p.user_id = 0 OR p.user_id = ?
 			GROUP BY p.id
 			ORDER BY p.created_at DESC`
 		args = []interface{}{uid}
 	} else {
 		// Unauthenticated: only show legacy playlists (user_id IS NULL)
 		query = `
-			SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at
+			SELECT p.id, p.name, COUNT(i.track_id), COALESCE(SUM(t.duration_sec),0), p.created_at, COALESCE(p.description,''), COALESCE(p.cover_art_path,'')
 			FROM playlists p
 			LEFT JOIN playlist_items i ON i.playlist_id = p.id
 			LEFT JOIN tracks t ON t.id = i.track_id
@@ -110,7 +115,7 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	out := []Playlist{}
 	for rows.Next() {
 		var p Playlist
-		if err := rows.Scan(&p.ID, &p.Name, &p.TrackCount, &p.TotalDuration, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.TrackCount, &p.TotalDuration, &p.CreatedAt, &p.Description, &p.CoverArtPath); err != nil {
 			log.Printf("[playlists] list scan: %v", err)
 			writeError(w, err.Error(), 500)
 			return
@@ -126,7 +131,8 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 }
 
 type createReq struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 func (a *API) create(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +152,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Check for duplicate name before creating
 	var existingID int64
-	if err := a.db.QueryRowContext(r.Context(), `SELECT id FROM playlists WHERE name=? AND (user_id IS NULL OR user_id=?)`, req.Name, getUserID(r)).Scan(&existingID); err != sql.ErrNoRows {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT id FROM playlists WHERE name=? AND (user_id IS NULL OR user_id=0 OR user_id=?)`, req.Name, getUserID(r)).Scan(&existingID); err != sql.ErrNoRows {
 		if err == nil {
 			writeError(w, "playlist with this name already exists", 409)
 			return
@@ -155,7 +161,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err.Error(), 500)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name, user_id) VALUES (?, ?)`, req.Name, getUserID(r))
+	res, err := a.db.ExecContext(r.Context(), `INSERT INTO playlists (name, user_id, description) VALUES (?, ?, ?)`, req.Name, getUserID(r), req.Description)
 	if err != nil {
 		log.Printf("[playlists] create insert: %v", err)
 		writeError(w, err.Error(), 500)
@@ -169,7 +175,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	var p PlaylistWithTracks
 	err := a.db.QueryRowContext(r.Context(), `
-		SELECT id, name, created_at FROM playlists WHERE id=? AND (user_id IS NULL OR user_id=?)`, id, getUserID(r)).Scan(&p.ID, &p.Name, &p.CreatedAt)
+		SELECT id, name, created_at, COALESCE(description,''), COALESCE(cover_art_path,'') FROM playlists WHERE id=? AND (user_id IS NULL OR user_id=0 OR user_id=?)`, id, getUserID(r)).Scan(&p.ID, &p.Name, &p.CreatedAt, &p.Description, &p.CoverArtPath)
 	if err != nil {
 		log.Printf("[playlists] get playlist %d: %v", id, err)
 		writeError(w, "not found", 404)
@@ -190,7 +196,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t models.Track
 		var path, title, artist, albumArtist, album, genre, mediaKind, mime sql.NullString
-		var spotifyID, externalURL, appleID sql.NullString
+		var spotifyID, externalURL, appleID, fileSHA256 sql.NullString
 		var trackNo, discNo, year, durationSec sql.NullInt64
 		var sizeBytes, addedAt, mtime sql.NullInt64
 		var coverPath sql.NullString
@@ -205,6 +211,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 			&sizeBytes, &coverPath, &addedAt, &mtime,
 			&loudnessIntegrated, &loudnessTruePeak, &loudnessRange,
 			&spotifyID, &externalURL, &appleID,
+			&fileSHA256,
 			&userID,
 			&position,
 		)
@@ -252,7 +259,9 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateReq struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CoverArtPath string `json:"cover_art_path"`
 }
 
 func (a *API) update(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +276,7 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "name is required", 400)
 		return
 	}
-	res, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=? WHERE id=? AND (user_id IS NULL OR user_id=?)`, req.Name, id, getUserID(r))
+	res, err := a.db.ExecContext(r.Context(), `UPDATE playlists SET name=?, description=?, cover_art_path=? WHERE id=? AND (user_id IS NULL OR user_id=0 OR user_id=?)`, req.Name, req.Description, req.CoverArtPath, id, getUserID(r))
 	if err != nil {
 		log.Printf("[playlists] update exec playlist %d: %v", id, err)
 		writeError(w, err.Error(), 500)
@@ -288,7 +297,7 @@ func (a *API) update(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=? AND (user_id IS NULL OR user_id=?)`, id, getUserID(r))
+	res, err := a.db.ExecContext(r.Context(), `DELETE FROM playlists WHERE id=? AND (user_id IS NULL OR user_id=0 OR user_id=?)`, id, getUserID(r))
 	if err != nil {
 		log.Printf("[playlists] delete exec playlist %d: %v", id, err)
 		writeError(w, err.Error(), 500)
@@ -424,6 +433,88 @@ func (a *API) removeTrack(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[playlists] removeTrack commit playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+type reorderReq struct {
+	FromPosition int `json:"from_position"`
+	ToPosition   int `json:"to_position"`
+}
+
+func (a *API) reorderTracks(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	var req reorderReq
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodySize)).Decode(&req); err != nil {
+		log.Printf("[playlists] reorderTracks decode playlist %d: %v", id, err)
+		writeError(w, err.Error(), 400)
+		return
+	}
+	if req.FromPosition < 0 || req.ToPosition < 0 {
+		writeError(w, "positions must be >= 0", 400)
+		return
+	}
+	if req.FromPosition == req.ToPosition {
+		writeJSON(w, map[string]bool{"ok": true})
+		return
+	}
+
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("[playlists] reorderTracks begin tx playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+	defer tx.Rollback()
+
+	// Get the track being moved
+	var trackID int64
+	err = tx.QueryRowContext(r.Context(),
+		`SELECT track_id FROM playlist_items WHERE playlist_id=? AND position=?`,
+		id, req.FromPosition).Scan(&trackID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, "track not found at position", 404)
+		} else {
+			log.Printf("[playlists] reorderTracks lookup playlist %d: %v", id, err)
+			writeError(w, err.Error(), 500)
+		}
+		return
+	}
+
+	if req.FromPosition < req.ToPosition {
+		// Moving down: shift items between from+1 and to up by 1
+		if _, err := tx.ExecContext(r.Context(),
+			`UPDATE playlist_items SET position = position - 1 WHERE playlist_id=? AND position > ? AND position <= ?`,
+			id, req.FromPosition, req.ToPosition); err != nil {
+			log.Printf("[playlists] reorderTracks shift up playlist %d: %v", id, err)
+			writeError(w, err.Error(), 500)
+			return
+		}
+	} else {
+		// Moving up: shift items between to and from-1 down by 1
+		if _, err := tx.ExecContext(r.Context(),
+			`UPDATE playlist_items SET position = position + 1 WHERE playlist_id=? AND position >= ? AND position < ?`,
+			id, req.ToPosition, req.FromPosition); err != nil {
+			log.Printf("[playlists] reorderTracks shift down playlist %d: %v", id, err)
+			writeError(w, err.Error(), 500)
+			return
+		}
+	}
+
+	// Place the moved track at its new position
+	if _, err := tx.ExecContext(r.Context(),
+		`UPDATE playlist_items SET position = ? WHERE playlist_id=? AND track_id=?`,
+		req.ToPosition, id, trackID); err != nil {
+		log.Printf("[playlists] reorderTracks place playlist %d: %v", id, err)
+		writeError(w, err.Error(), 500)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("[playlists] reorderTracks commit playlist %d: %v", id, err)
 		writeError(w, err.Error(), 500)
 		return
 	}
